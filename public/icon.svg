@@ -1,0 +1,7 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="112" fill="#121316"/>
+  <rect x="32" y="32" width="448" height="448" rx="80" stroke="#C1443B" stroke-width="24" stroke-linecap="round"/>
+  <!-- Video play icon & face redaction outline -->
+  <polygon points="190,160 360,256 190,352" fill="#C1443B"/>
+  <rect x="140" y="220" width="232" height="72" rx="12" stroke="#5B8C6E" stroke-width="20" stroke-dasharray="24 16" fill="rgba(91,140,110,0.2)"/>
+</svg>
