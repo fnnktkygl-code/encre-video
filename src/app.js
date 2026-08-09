@@ -377,12 +377,25 @@ import { initPWA } from './pwa.js';
   });
 
   // Video Render Loop
-  async function loop() {
+  let faceDetecting = false;
+
+  function loop() {
     if (state.hasVideo && videoEl.readyState >= 2) {
-      if (state.faceDetectionEnabled && state.faceModelLoaded) {
-        faceTracks = await maybeRunDetection(workCanvas, videoEl.currentTime, faceTracks, uuid);
+      if (state.faceDetectionEnabled && state.faceModelLoaded && !faceDetecting) {
+        faceDetecting = true;
+        maybeRunDetection(workCanvas, videoEl.currentTime, faceTracks, uuid)
+          .then((newTracks) => {
+            faceTracks = newTracks;
+            smoothTracks(faceTracks);
+            faceDetecting = false;
+          })
+          .catch(() => {
+            faceDetecting = false;
+          });
+      } else if (state.faceDetectionEnabled && faceTracks.length > 0) {
         smoothTracks(faceTracks);
       }
+
       renderVideoFrame(
         videoEl,
         workCanvas,

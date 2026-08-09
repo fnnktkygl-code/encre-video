@@ -65,6 +65,45 @@ export function renderVideoFrame(
   }
 }
 
+let audioCtx = null;
+let audioSourceNode = null;
+let audioDestNode = null;
+
+export function getAudioTrackFromVideo(videoEl) {
+  try {
+    if (!audioCtx) {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (AudioContextClass) {
+        audioCtx = new AudioContextClass();
+        audioSourceNode = audioCtx.createMediaElementSource(videoEl);
+        audioDestNode = audioCtx.createMediaStreamDestination();
+        audioSourceNode.connect(audioDestNode);
+        audioSourceNode.connect(audioCtx.destination);
+      }
+    }
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    if (audioDestNode && audioDestNode.stream) {
+      const tracks = audioDestNode.stream.getAudioTracks();
+      if (tracks.length > 0) return tracks[0];
+    }
+  } catch (e) {
+    console.warn('[Encre Vidéo] Web Audio capture fallback:', e);
+  }
+
+  // Fallback to captureStream
+  try {
+    const stream = videoEl.captureStream ? videoEl.captureStream() : (videoEl.mozCaptureStream ? videoEl.mozCaptureStream() : null);
+    if (stream) {
+      const tracks = stream.getAudioTracks();
+      if (tracks.length > 0) return tracks[0];
+    }
+  } catch (e) {}
+
+  return null;
+}
+
 export async function exportVideo(videoEl, workCanvas, currentFileBaseName, onProgress, onFinish) {
   if (!('MediaRecorder' in window)) {
     window.alert("Ce navigateur ne prend pas en charge l'exportation vidéo (MediaRecorder).");
@@ -94,20 +133,17 @@ export async function exportVideo(videoEl, workCanvas, currentFileBaseName, onPr
   const combined = new MediaStream();
   canvasStream.getVideoTracks().forEach(tr => combined.addTrack(tr));
 
-  try {
-    const mediaSource = videoEl.captureStream ? videoEl.captureStream() : (videoEl.mozCaptureStream ? videoEl.mozCaptureStream() : null);
-    if (mediaSource) {
-      mediaSource.getAudioTracks().forEach(tr => combined.addTrack(tr));
-    }
-  } catch (e) {
-    // Continue without audio if audio stream capture fails
+  const audioTrack = getAudioTrackFromVideo(videoEl);
+  if (audioTrack) {
+    combined.addTrack(audioTrack);
   }
 
   const mimeCandidates = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+    'video/mp4',
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
-    'video/webm',
-    'video/mp4'
+    'video/webm'
   ];
   let mimeType = '';
   for (let i = 0; i < mimeCandidates.length; i++) {
@@ -117,11 +153,23 @@ export async function exportVideo(videoEl, workCanvas, currentFileBaseName, onPr
     }
   }
 
-  const recorder = mimeType ? new MediaRecorder(combined, { mimeType }) : new MediaRecorder(combined);
+  const recorderOptions = mimeType
+    ? { mimeType, videoBitsPerSecond: 3500000 }
+    : { videoBitsPerSecond: 3500000 };
+
+  let recorder;
+  try {
+    recorder = new MediaRecorder(combined, recorderOptions);
+  } catch (e) {
+    recorder = new MediaRecorder(combined);
+  }
+
   const chunks = [];
 
   recorder.ondataavailable = (e) => {
-    if (e.data && e.data.size) chunks.push(e.data);
+    if (e.data && e.data.size > 0) {
+      chunks.push(e.data);
+    }
   };
 
   const stopped = new Promise((resolve) => {
@@ -135,7 +183,7 @@ export async function exportVideo(videoEl, workCanvas, currentFileBaseName, onPr
 
   videoEl.addEventListener('timeupdate', onTimeUpdateProgress);
 
-  recorder.start();
+  recorder.start(200); // 200ms timeslice to flush chunks continuously
   videoEl.play();
 
   await new Promise((resolve) => {
@@ -145,12 +193,24 @@ export async function exportVideo(videoEl, workCanvas, currentFileBaseName, onPr
     };
   });
 
-  recorder.stop();
+  if (recorder.state !== 'inactive') {
+    try { recorder.requestData(); } catch (e) {}
+    recorder.stop();
+  }
   await stopped;
+
   videoEl.removeEventListener('timeupdate', onTimeUpdateProgress);
 
-  const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+  const ext = (mimeType && mimeType.includes('mp4')) ? 'mp4' : 'webm';
   const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
+
+  if (blob.size === 0) {
+    window.alert("L'exportation a échoué. Veuillez réessayer.");
+    videoEl.pause();
+    onFinish(false);
+    return;
+  }
+
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
