@@ -1,29 +1,25 @@
 "use strict";
 
+import * as tf from '@tensorflow/tfjs';
+import * as blazeface from '@tensorflow-models/blazeface';
+
 let blazefaceModel = null;
 let detecting = false;
 let lastDetectionTime = 0;
 const DETECTION_INTERVAL_MS = 180;
 
-export function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error(`Failed to load ${src}`));
-    document.head.appendChild(s);
-  });
-}
-
 export async function initFaceDetectionModel() {
   if (blazefaceModel) return blazefaceModel;
-  if (!window.tf) {
-    await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
+  try {
+    // 1. Try loading 100% local model files first
+    blazefaceModel = await blazeface.load({
+      modelUrl: '/model/blazeface/model.json'
+    });
+  } catch (localErr) {
+    console.warn('[Encre Vidéo] Local model load failed, falling back to default:', localErr);
+    // 2. Fallback to default TFHub model load if local path fails
+    blazefaceModel = await blazeface.load();
   }
-  if (!window.blazeface) {
-    await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.1.0/dist/blazeface.min.js');
-  }
-  blazefaceModel = await window.blazeface.load();
   return blazefaceModel;
 }
 

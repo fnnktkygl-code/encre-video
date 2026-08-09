@@ -1,11 +1,13 @@
-const CACHE_NAME = 'encre-video-v1';
+const CACHE_NAME = 'encre-video-v2';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
   '/manifest.json',
   '/icon.svg',
   '/icon-192.png',
-  '/icon-512.png'
+  '/icon-512.png',
+  '/model/blazeface/model.json',
+  '/model/blazeface/group1-shard1of1.bin'
 ];
 
 self.addEventListener('install', (event) => {
