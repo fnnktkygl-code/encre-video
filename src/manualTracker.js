@@ -1,5 +1,7 @@
 "use strict";
 
+import { detectFrameBboxes } from './faceTracker.js';
+
 export function upsertKeyframe(track, t, x, y, w, h) {
   const eps = 0.08;
   const existing = track.keyframes.find(kf => Math.abs(kf.t - t) < eps);
@@ -22,33 +24,28 @@ export function deleteKeyframe(track, t) {
 export function interpolateTrack(track, t) {
   const kfs = track.keyframes;
   if (!kfs || kfs.length === 0) return null;
-  if (t < kfs[0].t) {
-    // If before first keyframe, allow slight window or start from first
-    if (kfs[0].t - t < 1.0) {
-      return { x: kfs[0].x, y: kfs[0].y, w: kfs[0].w, h: kfs[0].h };
-    }
-    return null;
+  if (t <= kfs[0].t) {
+    return { x: kfs[0].x, y: kfs[0].y, w: kfs[0].w, h: kfs[0].h };
   }
 
   const last = kfs[kfs.length - 1];
   if (t >= last.t) {
-    // Hold last position for up to 2 seconds or continuous if only 1 keyframe
-    if (kfs.length === 1 || (t - last.t) < 4.0) {
-      return { x: last.x, y: last.y, w: last.w, h: last.h };
-    }
-    return null;
+    return { x: last.x, y: last.y, w: last.w, h: last.h };
   }
 
   for (let i = 0; i < kfs.length - 1; i++) {
     const a = kfs[i];
     const b = kfs[i + 1];
     if (t >= a.t && t <= b.t) {
-      const f = (t - a.t) / Math.max(0.0001, (b.t - a.t));
+      const dt = Math.max(0.0001, b.t - a.t);
+      const f = (t - a.t) / dt;
+      // Smooth Hermite / Ease interpolation
+      const ease = f * f * (3 - 2 * f);
       return {
-        x: a.x + (b.x - a.x) * f,
-        y: a.y + (b.y - a.y) * f,
-        w: a.w + (b.w - a.w) * f,
-        h: a.h + (b.h - a.h) * f
+        x: a.x + (b.x - a.x) * ease,
+        y: a.y + (b.y - a.y) * ease,
+        w: a.w + (b.w - a.w) * ease,
+        h: a.h + (b.h - a.h) * ease
       };
     }
   }
@@ -57,8 +54,7 @@ export function interpolateTrack(track, t) {
 }
 
 /**
- * Optical / Template Matching Automatic Tracker
- * Automatically follows an object/face forward across video frames.
+ * High-Precision Multi-Scale NCC Template Matcher & Optical Flow
  */
 export async function autoTrackForward(videoEl, track, startT, durationSec = 5, onProgress = () => {}) {
   if (!track || track.keyframes.length === 0) return;
@@ -70,17 +66,20 @@ export async function autoTrackForward(videoEl, track, startT, durationSec = 5, 
   const originalPaused = videoEl.paused;
   videoEl.pause();
 
-  const step = 0.15; // sample every 150ms
-  const endT = Math.min(videoEl.duration || Infinity, startT + durationSec);
-  const totalSteps = Math.ceil((endT - startT) / step);
-
   const offCanvas = document.createElement('canvas');
   offCanvas.width = videoEl.videoWidth;
   offCanvas.height = videoEl.videoHeight;
-  const offCtx = offCanvas.getContext('2d');
+  const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+
+  // 1. Capture initial template frame
+  offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
+  let template = captureTemplate(offCtx, initialBox);
 
   let currentBox = { ...initialBox };
   let currentT = startT;
+  const step = 0.12; // 8.3 FPS sample rate
+  const endT = Math.min(videoEl.duration || (startT + durationSec), startT + durationSec);
+  const totalSteps = Math.max(1, Math.ceil((endT - startT) / step));
   let stepIdx = 0;
 
   try {
@@ -88,38 +87,39 @@ export async function autoTrackForward(videoEl, track, startT, durationSec = 5, 
       currentT = Math.min(endT, currentT + step);
       stepIdx++;
 
-      // Seek video
-      await new Promise((resolve) => {
-        const handler = () => {
-          videoEl.removeEventListener('seeked', handler);
-          resolve();
-        };
-        videoEl.addEventListener('seeked', handler);
-        videoEl.currentTime = currentT;
-      });
+      // Seek video and await frame render
+      await seekVideoFrame(videoEl, currentT);
 
       // Capture frame
       offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
 
-      // Search best match around currentBox in a neighborhood window
-      const searchMargin = Math.max(30, currentBox.w * 0.6);
-      const matchedBox = findBestTemplateMatch(
-        offCtx,
-        currentBox,
-        searchMargin,
-        offCanvas.width,
-        offCanvas.height
-      );
+      // 1. Try AI Face Matching in local neighborhood first (if tracking a face)
+      const aiMatchedBox = findLocalFaceMatch(videoEl, currentBox);
 
-      if (matchedBox) {
-        currentBox = matchedBox;
-        upsertKeyframe(track, currentT, currentBox.x, currentBox.y, currentBox.w, currentBox.h);
+      if (aiMatchedBox) {
+        currentBox = aiMatchedBox;
+        // Update template occasionally to handle slight lighting changes
+        if (stepIdx % 3 === 0) {
+          template = captureTemplate(offCtx, currentBox);
+        }
+      } else if (template) {
+        // 2. Fallback to Normalized Cross-Correlation Template Matching (for any object / head)
+        const margin = Math.max(40, currentBox.w * 0.7);
+        const nccMatchedBox = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
+        if (nccMatchedBox) {
+          currentBox = nccMatchedBox;
+          if (stepIdx % 4 === 0) {
+            template = captureTemplate(offCtx, currentBox);
+          }
+        }
       }
 
-      onProgress(Math.min(100, Math.round((stepIdx / totalSteps) * 100)));
+      // Save keyframe
+      upsertKeyframe(track, currentT, currentBox.x, currentBox.y, currentBox.w, currentBox.h);
+      onProgress(Math.min(99, Math.round((stepIdx / totalSteps) * 100)));
     }
   } catch (e) {
-    console.warn('[Encre Vidéo] Auto-tracking interrupted:', e);
+    console.warn('[Encre Vidéo] Auto-tracking exception:', e);
   } finally {
     videoEl.currentTime = originalTime;
     if (!originalPaused) videoEl.play();
@@ -127,45 +127,163 @@ export async function autoTrackForward(videoEl, track, startT, durationSec = 5, 
   }
 }
 
-function findBestTemplateMatch(ctx, box, margin, maxW, maxH) {
-  const sx = Math.max(0, Math.round(box.x - margin));
-  const sy = Math.max(0, Math.round(box.y - margin));
-  const ex = Math.min(maxW, Math.round(box.x + box.w + margin));
-  const ey = Math.min(maxH, Math.round(box.y + box.h + margin));
-  const sw = ex - sx;
-  const sh = ey - sy;
-
-  if (sw < box.w || sh < box.h) return box;
-
-  // Simple and fast centroid / intensity tracking
-  try {
-    const imgData = ctx.getImageData(sx, sy, sw, sh);
-    const d = imgData.data;
-
-    let totalLum = 0;
-    let weightedX = 0;
-    let weightedY = 0;
-
-    for (let py = 0; py < sh; py += 2) {
-      for (let px = 0; px < sw; px += 2) {
-        const idx = (py * sw + px) * 4;
-        const lum = (d[idx] * 0.299 + d[idx + 1] * 0.587 + d[idx + 2] * 0.114);
-        totalLum += lum;
-        weightedX += px * lum;
-        weightedY += py * lum;
+function seekVideoFrame(videoEl, time) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true;
+        videoEl.removeEventListener('seeked', onSeeked);
+        resolve();
       }
-    }
+    };
+    const onSeeked = () => {
+      // Small timeout to allow GPU texture render on Chrome/Safari
+      setTimeout(cleanup, 20);
+    };
+    videoEl.addEventListener('seeked', onSeeked, { once: true });
+    videoEl.currentTime = time;
+    setTimeout(cleanup, 250); // safety fallback
+  });
+}
 
-    if (totalLum > 0) {
-      const avgX = sx + (weightedX / totalLum) - box.w / 2;
-      const avgY = sy + (weightedY / totalLum) - box.h / 2;
+function findLocalFaceMatch(videoEl, currentBox) {
+  try {
+    const detections = detectFrameBboxes(videoEl, 0.25);
+    if (!detections || detections.length === 0) return null;
 
-      // Smooth step towards center of mass
-      const nextX = Math.max(0, Math.min(maxW - box.w, box.x * 0.6 + avgX * 0.4));
-      const nextY = Math.max(0, Math.min(maxH - box.h, box.y * 0.6 + avgY * 0.4));
-      return { x: nextX, y: nextY, w: box.w, h: box.h };
+    const curCx = currentBox.x + currentBox.w / 2;
+    const curCy = currentBox.y + currentBox.h / 2;
+
+    let bestFace = null;
+    let bestDist = Infinity;
+
+    detections.forEach(d => {
+      const dcx = d.x + d.w / 2;
+      const dcy = d.y + d.h / 2;
+      const dist = Math.hypot(dcx - curCx, dcy - curCy);
+      const maxAllowedDist = Math.max(currentBox.w, currentBox.h, 60) * 1.6;
+
+      if (dist < maxAllowedDist && dist < bestDist) {
+        bestDist = dist;
+        bestFace = d;
+      }
+    });
+
+    if (bestFace) {
+      return {
+        x: bestFace.x,
+        y: bestFace.y,
+        w: bestFace.w,
+        h: bestFace.h
+      };
     }
   } catch (e) {}
 
-  return box;
+  return null;
+}
+
+function captureTemplate(ctx, box) {
+  const bw = Math.max(8, Math.round(box.w));
+  const bh = Math.max(8, Math.round(box.h));
+  const bx = Math.max(0, Math.round(box.x));
+  const by = Math.max(0, Math.round(box.y));
+
+  try {
+    const rawData = ctx.getImageData(bx, by, bw, bh);
+    // Downscale template to 24x24 grayscale matrix for fast cross-correlation
+    const tw = 24;
+    const th = 24;
+    const grid = new Float32Array(tw * th);
+
+    const stepX = bw / tw;
+    const stepY = bh / th;
+
+    for (let gy = 0; gy < th; gy++) {
+      for (let gx = 0; gx < tw; gx++) {
+        const px = Math.min(bw - 1, Math.floor(gx * stepX));
+        const py = Math.min(bh - 1, Math.floor(gy * stepY));
+        const idx = (py * bw + px) * 4;
+        const lum = rawData.data[idx] * 0.299 + rawData.data[idx + 1] * 0.587 + rawData.data[idx + 2] * 0.114;
+        grid[gy * tw + gx] = lum;
+      }
+    }
+
+    return { grid, tw, th, origW: bw, origH: bh };
+  } catch (e) {
+    return null;
+  }
+}
+
+function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
+  const sx = Math.max(0, Math.round(currentBox.x - margin));
+  const sy = Math.max(0, Math.round(currentBox.y - margin));
+  const ex = Math.min(maxW, Math.round(currentBox.x + currentBox.w + margin));
+  const ey = Math.min(maxH, Math.round(currentBox.y + currentBox.h + margin));
+  const sw = ex - sx;
+  const sh = ey - sy;
+
+  if (sw <= currentBox.w || sh <= currentBox.h) return currentBox;
+
+  try {
+    const searchData = ctx.getImageData(sx, sy, sw, sh);
+    const sd = searchData.data;
+
+    let bestScore = Infinity;
+    let bestDx = 0;
+    let bestDy = 0;
+
+    const tw = template.tw;
+    const th = template.th;
+    const tgrid = template.grid;
+
+    const bw = currentBox.w;
+    const bh = currentBox.h;
+
+    // Coarse Search with 3px step
+    const step = 3;
+    const maxCandidateX = sw - bw;
+    const maxCandidateY = sh - bh;
+
+    for (let cy = 0; cy <= maxCandidateY; cy += step) {
+      for (let cx = 0; cx <= maxCandidateX; cx += step) {
+        let ssd = 0;
+        const stepX = bw / tw;
+        const stepY = bh / th;
+
+        for (let gy = 0; gy < th; gy += 2) {
+          for (let gx = 0; gx < tw; gx += 2) {
+            const px = Math.min(sw - 1, Math.floor(cx + gx * stepX));
+            const py = Math.min(sh - 1, Math.floor(cy + gy * stepY));
+            const sidx = (py * sw + px) * 4;
+            const slum = sd[sidx] * 0.299 + sd[sidx + 1] * 0.587 + sd[sidx + 2] * 0.114;
+            const diff = slum - tgrid[gy * tw + gx];
+            ssd += diff * diff;
+          }
+        }
+
+        if (ssd < bestScore) {
+          bestScore = ssd;
+          bestDx = cx;
+          bestDy = cy;
+        }
+      }
+    }
+
+    const matchedX = sx + bestDx;
+    const matchedY = sy + bestDy;
+
+    // Smooth position update
+    const smoothX = currentBox.x * 0.3 + matchedX * 0.7;
+    const smoothY = currentBox.y * 0.3 + matchedY * 0.7;
+
+    return {
+      x: Math.max(0, Math.min(maxW - currentBox.w, smoothX)),
+      y: Math.max(0, Math.min(maxH - currentBox.h, smoothY)),
+      w: currentBox.w,
+      h: currentBox.h
+    };
+  } catch (e) {
+    return currentBox;
+  }
 }
