@@ -595,21 +595,25 @@ import { initPWA } from './pwa.js';
 
   // File loading
   async function loadVideoFile(file) {
-    if (!file || !file.type || !file.type.startsWith('video/')) return;
-    if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
-    const url = URL.createObjectURL(file);
-    lastObjectUrl = url;
-    currentFileBaseName = (file.name || 'video').replace(/\.[^.]+$/, '');
-    faceTracks = [];
-    manualTracks = [];
-    selectedManualTrackId = null;
-    renderManualTrackList();
-    renderPersonChips();
-    videoEl.src = url;
-    videoEl.load();
-    state.hasVideo = true;
-    updateChromeVisibility();
-    await loadFaceModels();
+    if (!file) return;
+    try {
+      if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
+      const url = URL.createObjectURL(file);
+      lastObjectUrl = url;
+      currentFileBaseName = (file.name || 'video').replace(/\.[^.]+$/, '');
+      faceTracks = [];
+      manualTracks = [];
+      selectedManualTrackId = null;
+      renderManualTrackList();
+      renderFaceChips();
+      videoEl.src = url;
+      videoEl.load();
+      state.hasVideo = true;
+      updateChromeVisibility();
+      await loadFaceModels();
+    } catch (err) {
+      console.error('[Encre Vidéo] Error loading video file:', err);
+    }
   }
 
   videoEl.addEventListener('loadedmetadata', () => {
