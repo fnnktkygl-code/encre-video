@@ -53,7 +53,7 @@ export function drawPixelatedRegion(destCtx, sourceCanvas, x, y, w, h, blockSize
   destCtx.imageSmoothingEnabled = prevSmoothing;
 }
 
-export function applyToClippedRect(destCanvas, sourceCanvas, x, y, w, h, mode, params) {
+export function applyToClippedRect(destCanvasOrCtx, sourceCanvas, x, y, w, h, mode, params) {
   let x2 = x + w;
   let y2 = y + h;
   x = Math.max(0, x);
@@ -64,43 +64,55 @@ export function applyToClippedRect(destCanvas, sourceCanvas, x, y, w, h, mode, p
   h = y2 - y;
   if (w <= 0 || h <= 0) return;
 
-  const ctx = destCanvas.getContext('2d');
+  const ctx = (destCanvasOrCtx && typeof destCanvasOrCtx.getContext === 'function')
+    ? destCanvasOrCtx.getContext('2d')
+    : destCanvasOrCtx;
+
+  if (!ctx) return;
+
   ctx.save();
   ctx.beginPath();
   ctx.rect(x, y, w, h);
   ctx.clip();
 
   if (mode === 'redact') {
-    ctx.fillStyle = params.color;
+    ctx.fillStyle = params.color || '#000000';
     ctx.fillRect(x, y, w, h);
   } else if (mode === 'blur') {
-    drawBlurredRegion(ctx, sourceCanvas, x, y, w, h, params.blurRadius);
+    drawBlurredRegion(ctx, sourceCanvas, x, y, w, h, params.blurRadius || 20);
   } else {
-    drawPixelatedRegion(ctx, sourceCanvas, x, y, w, h, params.pixelSize);
+    drawPixelatedRegion(ctx, sourceCanvas, x, y, w, h, params.pixelSize || 16);
   }
   ctx.restore();
 }
 
-export function applyToClippedOval(destCanvas, sourceCanvas, cx, cy, rx, ry, mode, params) {
+export function applyToClippedOval(destCanvasOrCtx, sourceCanvas, cx, cy, rx, ry, mode, params) {
+  const maxW = sourceCanvas.width;
+  const maxH = sourceCanvas.height;
   const x = Math.max(0, cx - rx);
   const y = Math.max(0, cy - ry);
-  const w = Math.min(destCanvas.width, cx + rx) - x;
-  const h = Math.min(destCanvas.height, cy + ry) - y;
+  const w = Math.min(maxW, cx + rx) - x;
+  const h = Math.min(maxH, cy + ry) - y;
   if (w <= 0 || h <= 0) return;
 
-  const ctx = destCanvas.getContext('2d');
+  const ctx = (destCanvasOrCtx && typeof destCanvasOrCtx.getContext === 'function')
+    ? destCanvasOrCtx.getContext('2d')
+    : destCanvasOrCtx;
+
+  if (!ctx) return;
+
   ctx.save();
   ctx.beginPath();
   ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
   ctx.clip();
 
   if (mode === 'redact') {
-    ctx.fillStyle = params.color;
+    ctx.fillStyle = params.color || '#000000';
     ctx.fillRect(x, y, w, h);
   } else if (mode === 'blur') {
-    drawBlurredRegion(ctx, sourceCanvas, x, y, w, h, params.blurRadius);
+    drawBlurredRegion(ctx, sourceCanvas, x, y, w, h, params.blurRadius || 20);
   } else {
-    drawPixelatedRegion(ctx, sourceCanvas, x, y, w, h, params.pixelSize);
+    drawPixelatedRegion(ctx, sourceCanvas, x, y, w, h, params.pixelSize || 16);
   }
   ctx.restore();
 }

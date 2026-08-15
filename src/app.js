@@ -383,7 +383,7 @@ import { initPWA } from './pwa.js';
     if (state.hasVideo && videoEl.readyState >= 2) {
       if (state.faceDetectionEnabled && state.faceModelLoaded && !faceDetecting) {
         faceDetecting = true;
-        maybeRunDetection(workCanvas, videoEl.currentTime, faceTracks, uuid)
+        maybeRunDetection(videoEl, videoEl.currentTime, faceTracks, uuid)
           .then((newTracks) => {
             faceTracks = newTracks;
             smoothTracks(faceTracks);
