@@ -9,8 +9,10 @@ import {
 import { setupGestures } from './gestures.js';
 import {
   initFaceDetectionModel,
-  scanAndTrackVideo,
-  getInterpolatedBoxAt
+  initPoseLandmarker,
+  updateRealTimeTracks,
+  smoothTracks,
+  getTrackBox
 } from './faceTracker.js';
 import {
   upsertKeyframe,
@@ -34,7 +36,7 @@ import { initPWA } from './pwa.js';
     blurRadius: 20,
     pixelSize: 16,
     facePadding: 20,
-    faceDetectionEnabled: false,
+    faceDetectionEnabled: true, // Enabled by default for effortless UX
     faceModelLoaded: false,
     faceModelLoading: false,
     editMode: 'lecture',   // 'lecture' | 'marker'
@@ -76,18 +78,13 @@ import { initPWA } from './pwa.js';
   const playBtn = document.getElementById('play-btn');
   const playIcon = document.getElementById('play-icon');
   
-  const scanVideoBtn = document.getElementById('scan-video-btn');
-  const scanProgressBox = document.getElementById('scan-progress-box');
-  const scanStatusText = document.getElementById('scan-status-text');
-  const scanPctText = document.getElementById('scan-pct-text');
-  const scanProgressBar = document.getElementById('scan-progress-bar');
+  const faceToggleBtn = document.getElementById('face-toggle-btn');
+  const paddingRange = document.getElementById('padding-range');
+  const paddingVal = document.getElementById('padding-val');
   const detectedPersonsBox = document.getElementById('detected-persons-box');
   const personCountBadge = document.getElementById('person-count-badge');
   const personChipList = document.getElementById('person-chip-list');
 
-  const faceToggleBtn = document.getElementById('face-toggle-btn');
-  const paddingRange = document.getElementById('padding-range');
-  const paddingVal = document.getElementById('padding-val');
   const markerModeBtn = document.getElementById('marker-mode-btn');
   const newTrackBtn = document.getElementById('new-track-btn');
   const manualTrackListEl = document.getElementById('manual-track-list');
@@ -143,7 +140,7 @@ import { initPWA } from './pwa.js';
   // Stamp and Face Status UI
   function updateStamp() {
     if (state.faceDetectionEnabled) {
-      stampEl.innerHTML = '<span class="dot"></span>MediaPipe &amp; ByteTrack — Suivi actif';
+      stampEl.innerHTML = '<span class="dot"></span>MediaPipe Dual IA (Visages + Corps) — Actif';
     } else {
       stampEl.innerHTML = '<span class="dot"></span>100% local — aucun réseau';
     }
@@ -161,15 +158,16 @@ import { initPWA } from './pwa.js';
       faceToggleBtn.disabled = false;
       faceToggleBtn.textContent = 'Activer le masquage automatique';
     }
+    const count = faceTracks.filter(t => t.enabled !== false).length;
     faceStatusLabel.textContent = state.faceDetectionEnabled
-      ? `${faceTracks.filter(t => t.enabled !== false).length} personne(s) masquée(s)`
+      ? `${count} personne(s) masquée(s)`
       : '';
     updateStamp();
+    renderPersonChips();
   }
 
   function renderPersonChips() {
     if (!personChipList) return;
-    personChipList.innerHTML = '';
     if (!faceTracks || faceTracks.length === 0) {
       if (detectedPersonsBox) detectedPersonsBox.style.display = 'none';
       return;
@@ -177,82 +175,60 @@ import { initPWA } from './pwa.js';
     if (detectedPersonsBox) detectedPersonsBox.style.display = '';
     if (personCountBadge) personCountBadge.textContent = faceTracks.length;
 
-    faceTracks.forEach(track => {
-      const chip = document.createElement('button');
-      const isEnabled = track.enabled !== false;
-      chip.style.cssText = `
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 5px 9px;
-        font-size: 11px;
-        font-weight: 600;
-        border-radius: 6px;
-        cursor: pointer;
-        border: 1px solid ${isEnabled ? 'var(--accent)' : 'var(--border)'};
-        background: ${isEnabled ? 'rgba(0, 245, 212, 0.15)' : 'var(--surface)'};
-        color: ${isEnabled ? 'var(--accent)' : 'var(--text-muted)'};
-        transition: all 0.15s ease;
-      `;
-      chip.innerHTML = `${isEnabled ? '👁️' : '🚫'} ${track.name || 'Personne ' + track.id}`;
-      chip.title = isEnabled ? 'Masquage actif (cliquer pour exclure)' : 'Exclu du masquage (cliquer pour activer)';
-      chip.addEventListener('click', () => {
-        track.enabled = !isEnabled;
-        renderPersonChips();
-        updateFaceUI();
-      });
-      personChipList.appendChild(chip);
-    });
-  }
-
-  if (scanVideoBtn) {
-    scanVideoBtn.addEventListener('click', async () => {
-      if (!state.hasVideo) {
-        window.alert("Veuillez d'abord ouvrir une vidéo.");
-        return;
-      }
-      scanVideoBtn.disabled = true;
-      if (scanProgressBox) scanProgressBox.style.display = '';
-
-      try {
-        const validTracks = await scanAndTrackVideo(videoEl, (pct, count) => {
-          if (scanProgressBar) scanProgressBar.style.width = pct + '%';
-          if (scanPctText) scanPctText.textContent = pct + '%';
-          if (scanStatusText) scanStatusText.textContent = `Analyse temporelle : ${count} personne(s) suivie(s)…`;
+    // Only re-render if count or list changed
+    if (personChipList.children.length !== faceTracks.length) {
+      personChipList.innerHTML = '';
+      faceTracks.forEach(track => {
+        const chip = document.createElement('button');
+        const isEnabled = track.enabled !== false;
+        chip.style.cssText = `
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 4px 8px;
+          font-size: 11px;
+          font-weight: 600;
+          border-radius: 6px;
+          cursor: pointer;
+          border: 1px solid ${isEnabled ? 'var(--accent)' : 'var(--border)'};
+          background: ${isEnabled ? 'rgba(0, 245, 212, 0.15)' : 'var(--surface)'};
+          color: ${isEnabled ? 'var(--accent)' : 'var(--text-muted)'};
+        `;
+        chip.innerHTML = `${isEnabled ? '👁️' : '🚫'} ${track.name || 'Personne ' + track.id}`;
+        chip.addEventListener('click', () => {
+          track.enabled = !isEnabled;
+          updateFaceUI();
         });
-
-        faceTracks = validTracks;
-        state.faceDetectionEnabled = true;
-        state.faceModelLoaded = true;
-        updateFaceUI();
-        renderPersonChips();
-
-        if (scanStatusText) scanStatusText.textContent = `✅ Analyse terminée : ${validTracks.length} personne(s) suivie(s) !`;
-        setTimeout(() => {
-          if (scanProgressBox) scanProgressBox.style.display = 'none';
-        }, 3000);
-      } catch (err) {
-        console.error(err);
-        window.alert("Erreur lors de l'analyse vidéo : " + (err.message || err));
-        if (scanProgressBox) scanProgressBox.style.display = 'none';
-      } finally {
-        scanVideoBtn.disabled = false;
-      }
-    });
-  }
-
-  async function enableFaceDetection() {
-    if (state.faceModelLoaded && faceTracks.length > 0) {
-      state.faceDetectionEnabled = !state.faceDetectionEnabled;
-      updateFaceUI();
-      renderPersonChips();
-      return;
+        personChipList.appendChild(chip);
+      });
     }
-    // If no tracks scanned yet, trigger scan
-    if (scanVideoBtn) scanVideoBtn.click();
   }
 
-  faceToggleBtn.addEventListener('click', enableFaceDetection);
+  async function loadFaceModels() {
+    if (state.faceModelLoaded || state.faceModelLoading) return;
+    state.faceModelLoading = true;
+    updateFaceUI();
+    try {
+      await Promise.all([
+        initFaceDetectionModel(0.2),
+        initPoseLandmarker()
+      ]);
+      state.faceModelLoaded = true;
+    } catch (err) {
+      console.warn('[Encre Vidéo] Model load error:', err);
+    } finally {
+      state.faceModelLoading = false;
+      updateFaceUI();
+    }
+  }
+
+  faceToggleBtn.addEventListener('click', async () => {
+    state.faceDetectionEnabled = !state.faceDetectionEnabled;
+    if (state.faceDetectionEnabled && !state.faceModelLoaded) {
+      await loadFaceModels();
+    }
+    updateFaceUI();
+  });
 
   if (paddingRange) {
     paddingRange.addEventListener('input', (e) => {
@@ -526,6 +502,20 @@ import { initPWA } from './pwa.js';
   // Video Render Loop
   function loop() {
     if (state.hasVideo && videoEl.readyState >= 2) {
+      // Real-time Detection Pass
+      if (state.faceDetectionEnabled && state.faceModelLoaded) {
+        updateRealTimeTracks(videoEl, videoEl.currentTime, faceTracks, uuid, 0.2)
+          .then((newTracks) => {
+            faceTracks = newTracks;
+            smoothTracks(faceTracks);
+            updateFaceUI();
+          })
+          .catch(() => {});
+      } else if (state.faceDetectionEnabled && faceTracks.length > 0) {
+        smoothTracks(faceTracks);
+      }
+
+      // Draw blur/redact on Canvas
       renderVideoFrame(
         videoEl,
         workCanvas,
@@ -533,7 +523,7 @@ import { initPWA } from './pwa.js';
         state,
         faceTracks,
         manualTracks,
-        getInterpolatedBoxAt,
+        getTrackBox,
         interpolateTrack
       );
 
@@ -571,7 +561,7 @@ import { initPWA } from './pwa.js';
   }
 
   // File loading
-  function loadVideoFile(file) {
+  async function loadVideoFile(file) {
     if (!file || !file.type || !file.type.startsWith('video/')) return;
     if (lastObjectUrl) URL.revokeObjectURL(lastObjectUrl);
     const url = URL.createObjectURL(file);
@@ -586,6 +576,7 @@ import { initPWA } from './pwa.js';
     videoEl.load();
     state.hasVideo = true;
     updateChromeVisibility();
+    await loadFaceModels();
   }
 
   videoEl.addEventListener('loadedmetadata', () => {
@@ -601,11 +592,6 @@ import { initPWA } from './pwa.js';
     updateTimeLabel();
     fitToScreen();
     startLoop();
-
-    // Auto-trigger pro video scan on first load
-    setTimeout(() => {
-      if (scanVideoBtn) scanVideoBtn.click();
-    }, 400);
   });
 
   videoEl.addEventListener('timeupdate', () => {

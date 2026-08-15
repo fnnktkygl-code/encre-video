@@ -16,7 +16,7 @@ export function renderVideoFrame(
   state,
   faceTracks,
   manualTracks,
-  getInterpolatedBoxFn,
+  getTrackBoxFn,
   interpolateManualTrackFn
 ) {
   if (!state.hasVideo || videoEl.readyState < 2) return;
@@ -27,11 +27,11 @@ export function renderVideoFrame(
     const rawFrame = cloneCanvas(workCanvas);
     const t = videoEl.currentTime;
 
-    // Apply auto face/head detection masks from ByteTrack
+    // Apply auto face/head detection masks
     if (state.faceDetectionEnabled && faceTracks && faceTracks.length > 0) {
       faceTracks.forEach((track) => {
         if (track.enabled === false) return;
-        const box = getInterpolatedBoxFn(track, t, state.facePadding);
+        const box = getTrackBoxFn(track, state.facePadding);
         if (box) {
           applyToClippedRect(
             workCtx,

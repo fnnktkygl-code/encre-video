@@ -1,12 +1,13 @@
 "use strict";
 
 import { FaceDetector, PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { ByteTracker } from './byteTracker.js';
 
 let faceDetector = null;
 let poseLandmarker = null;
 let visionResolver = null;
-let isScanning = false;
+let isDetecting = false;
+let lastDetectionTime = 0;
+const DETECTION_INTERVAL_MS = 60; // Run detection at ~16 FPS for silky smooth tracking
 
 async function getVisionResolver() {
   if (visionResolver) return visionResolver;
@@ -59,10 +60,10 @@ export async function initPoseLandmarker() {
         delegate: 'GPU'
       },
       runningMode: 'VIDEO',
-      numPoses: 6,
-      minPoseDetectionConfidence: 0.3,
-      minPosePresenceConfidence: 0.3,
-      minTrackingConfidence: 0.3
+      numPoses: 8,
+      minPoseDetectionConfidence: 0.25,
+      minPosePresenceConfidence: 0.25,
+      minTrackingConfidence: 0.25
     });
   } catch (err) {
     console.warn('[Encre Vidéo] Pose Landmarker GPU init error, using CPU:', err);
@@ -73,10 +74,10 @@ export async function initPoseLandmarker() {
           delegate: 'CPU'
         },
         runningMode: 'VIDEO',
-        numPoses: 6,
-        minPoseDetectionConfidence: 0.3,
-        minPosePresenceConfidence: 0.3,
-        minTrackingConfidence: 0.3
+        numPoses: 8,
+        minPoseDetectionConfidence: 0.25,
+        minPosePresenceConfidence: 0.25,
+        minTrackingConfidence: 0.25
       });
     } catch (e2) {
       console.warn('[Encre Vidéo] Pose Landmarker unavailable, using pure Face detection:', e2);
@@ -86,14 +87,15 @@ export async function initPoseLandmarker() {
 }
 
 /**
- * Extracts candidate head/face bounding boxes from a single video frame
+ * Detects all faces and head keypoints in the current video frame
  */
 export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
   const detections = [];
   const width = videoEl.videoWidth;
   const height = videoEl.videoHeight;
+  if (!width || !height) return detections;
 
-  // 1. Face Detector Pass (High Precision for visible faces)
+  // 1. Face Detector Pass (Full-Range BlazeFace)
   if (faceDetector) {
     try {
       const faceResult = faceDetector.detectForVideo(videoEl, timeMs);
@@ -113,7 +115,7 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
     } catch (e) {}
   }
 
-  // 2. Pose Landmarker Pass (Extracts head boxes even for turned/occluded heads)
+  // 2. Pose Landmarker Pass (Heads from Shoulder/Ear geometry)
   if (poseLandmarker) {
     try {
       const poseResult = poseLandmarker.detectForVideo(videoEl, timeMs);
@@ -121,14 +123,12 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
         poseResult.landmarks.forEach(landmarks => {
           if (!landmarks || landmarks.length < 13) return;
 
-          // Keypoints: 0=Nose, 7=Left Ear, 8=Right Ear, 11=Left Shoulder, 12=Right Shoulder
           const nose = landmarks[0];
           const leftEar = landmarks[7];
           const rightEar = landmarks[8];
           const leftShoulder = landmarks[11];
           const rightShoulder = landmarks[12];
 
-          // Compute head center & dimensions from pose
           const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
           const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
           const shoulderDist = Math.hypot(
@@ -136,27 +136,25 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
             (leftShoulder.y - rightShoulder.y) * height
           );
 
-          // Head width is typically ~50% of shoulder width
-          const headW = Math.max(25, shoulderDist * 0.55);
-          const headH = headW * 1.2;
+          const headW = Math.max(30, shoulderDist * 0.55);
+          const headH = headW * 1.25;
 
-          let headCenterX = (nose.visibility > 0.4 ? nose.x : shoulderMidX) * width;
-          let headCenterY = (nose.visibility > 0.4 ? nose.y : (shoulderMidY - (headH / height) * 0.7)) * height;
+          const headCenterX = (nose && nose.visibility > 0.3 ? nose.x : shoulderMidX) * width;
+          const headCenterY = (nose && nose.visibility > 0.3 ? nose.y : (shoulderMidY - (headH / height) * 0.7)) * height;
 
           const candidate = {
             x: headCenterX - headW / 2,
             y: headCenterY - headH / 2,
             w: headW,
             h: headH,
-            score: 0.65,
+            score: 0.6,
             source: 'pose_head'
           };
 
-          // Check if this head is already covered by a high-confidence face detection
           const alreadyCovered = detections.some(d => {
             const overlapX = Math.abs((d.x + d.w / 2) - headCenterX);
             const overlapY = Math.abs((d.y + d.h / 2) - headCenterY);
-            return overlapX < Math.max(d.w, headW) * 0.8 && overlapY < Math.max(d.h, headH) * 0.8;
+            return overlapX < Math.max(d.w, headW) * 0.75 && overlapY < Math.max(d.h, headH) * 0.75;
           });
 
           if (!alreadyCovered) {
@@ -171,126 +169,114 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
 }
 
 /**
- * 🚀 CAPCUT-GRADE OFFLINE VIDEO SCANNER
- * Performs a complete temporal analysis pass across the whole video with ByteTrack.
+ * Real-time continuous Multi-Person Tracker
  */
-export async function scanAndTrackVideo(videoEl, onProgress = () => {}) {
-  if (isScanning) return [];
-  isScanning = true;
+export async function updateRealTimeTracks(videoEl, videoTime, existingTracks, uuidFn, minConfidence = 0.2) {
+  if (isDetecting || !videoEl || videoEl.readyState < 2) {
+    return existingTracks;
+  }
+
+  const now = performance.now();
+  if (now - lastDetectionTime < DETECTION_INTERVAL_MS) {
+    return existingTracks;
+  }
+  lastDetectionTime = now;
+  isDetecting = true;
 
   try {
-    await initFaceDetectionModel(0.2);
-    await initPoseLandmarker();
+    const timestampMs = Math.round(videoTime * 1000) || Math.round(now);
+    const preds = await detectFrameBboxes(videoEl, timestampMs, minConfidence);
 
-    const originalTime = videoEl.currentTime;
-    const originalPaused = videoEl.paused;
-    videoEl.pause();
-
-    const duration = videoEl.duration || 10;
-    const stepSec = 0.08; // Sample at 12.5 FPS for accurate temporal resolution
-    const totalSteps = Math.ceil(duration / stepSec);
-
-    const tracker = new ByteTracker(0.4, 0.15, 2.2);
-    let currentTime = 0;
-    let step = 0;
-
-    while (currentTime <= duration) {
-      step++;
-      const timeMs = Math.round(currentTime * 1000);
-
-      // Seek video to exact frame
-      await new Promise(resolve => {
-        const onSeeked = () => {
-          videoEl.removeEventListener('seeked', onSeeked);
-          resolve();
-        };
-        videoEl.addEventListener('seeked', onSeeked);
-        videoEl.currentTime = currentTime;
-      });
-
-      // Detect in frame
-      const frameDets = await detectFrameBboxes(videoEl, timeMs, 0.2);
-
-      // Associate with ByteTrack
-      tracker.update(frameDets, currentTime);
-
-      const pct = Math.min(99, Math.round((step / totalSteps) * 100));
-      onProgress(pct, tracker.tracks.length);
-
-      currentTime += stepSec;
-    }
-
-    // Bidirectional smoothing & interpolation
-    const finalizedTracks = tracker.finalizeTrajectories();
-
-    // Filter out micro-false positives (tracks that only appeared for < 0.2s)
-    const validTracks = finalizedTracks.filter(t => t.keyframes.length >= 3);
-
-    // Restore original video state
-    videoEl.currentTime = originalTime;
-    if (!originalPaused) videoEl.play();
-    onProgress(100, validTracks.length);
-
-    return validTracks;
+    return matchAndSmoothTracks(preds, videoTime, existingTracks, uuidFn);
   } catch (err) {
-    console.error('[Encre Vidéo] Video scanning error:', err);
-    throw err;
+    console.warn('[Encre Vidéo] Real-time tracking error:', err);
+    return existingTracks;
   } finally {
-    isScanning = false;
+    isDetecting = false;
   }
 }
 
-/**
- * Get interpolated bounding box for a track at any video timestamp
- */
-export function getInterpolatedBoxAt(track, time, paddingPercent = 20) {
-  if (!track || !track.enabled || !track.keyframes || track.keyframes.length === 0) {
-    return null;
-  }
+export function matchAndSmoothTracks(preds, videoTime, existingTracks, uuidFn) {
+  const used = new Array(existingTracks.length).fill(false);
+  const updatedTracks = [...existingTracks];
 
-  const kfs = track.keyframes;
-  if (time < kfs[0].t - 0.2 || time > kfs[kfs.length - 1].t + 0.2) {
-    return null;
-  }
+  preds.forEach(p => {
+    const cx = p.x + p.w / 2;
+    const cy = p.y + p.h / 2;
+    const w = p.w;
+    const h = p.h;
 
-  let box = null;
-  if (time <= kfs[0].t) {
-    box = kfs[0];
-  } else if (time >= kfs[kfs.length - 1].t) {
-    box = kfs[kfs.length - 1];
-  } else {
-    // Binary search for closest keyframe interval
-    let low = 0;
-    let high = kfs.length - 1;
-    while (low <= high) {
-      const mid = (low + high) >> 1;
-      if (kfs[mid].t <= time && (mid === kfs.length - 1 || kfs[mid + 1].t >= time)) {
-        const a = kfs[mid];
-        const b = kfs[mid + 1] || a;
-        const dt = Math.max(0.0001, b.t - a.t);
-        const f = (time - a.t) / dt;
-        box = {
-          x: a.x + (b.x - a.x) * f,
-          y: a.y + (b.y - a.y) * f,
-          w: a.w + (b.w - a.w) * f,
-          h: a.h + (b.h - a.h) * f
-        };
-        break;
-      } else if (kfs[mid].t < time) {
-        low = mid + 1;
-      } else {
-        high = mid - 1;
+    let bestIdx = -1;
+    let bestDist = Infinity;
+
+    updatedTracks.forEach((t, i) => {
+      if (used[i]) return;
+      const dt = Math.max(0, videoTime - t.lastSeen);
+      const predX = t.targetX + (t.vx || 0) * dt;
+      const predY = t.targetY + (t.vy || 0) * dt;
+      const d = Math.hypot(predX - cx, predY - cy);
+
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
       }
+    });
+
+    const threshold = Math.max(w, h, 60) * 1.8;
+    if (bestIdx !== -1 && bestDist < threshold) {
+      const t = updatedTracks[bestIdx];
+      const dt = Math.max(0.01, videoTime - t.lastSeen);
+      t.vx = (cx - t.targetX) / dt;
+      t.vy = (cy - t.targetY) / dt;
+      t.targetX = cx;
+      t.targetY = cy;
+      t.targetW = w;
+      t.targetH = h;
+      t.lastSeen = videoTime;
+      t.score = p.score;
+      used[bestIdx] = true;
+    } else {
+      const id = updatedTracks.length + 1;
+      updatedTracks.push({
+        id: id,
+        name: `Personne ${id}`,
+        enabled: true,
+        targetX: cx,
+        targetY: cy,
+        targetW: w,
+        targetH: h,
+        dispX: cx,
+        dispY: cy,
+        dispW: w,
+        dispH: h,
+        vx: 0,
+        vy: 0,
+        lastSeen: videoTime,
+        score: p.score
+      });
     }
-  }
+  });
 
-  if (!box) return null;
+  // Keep tracks alive for up to 1.8 seconds of occlusion/turning
+  return updatedTracks.filter(t => Math.abs(videoTime - t.lastSeen) < 1.8);
+}
 
+export function smoothTracks(tracks) {
+  const ease = 0.5;
+  tracks.forEach(t => {
+    t.dispX += (t.targetX - t.dispX) * ease;
+    t.dispY += (t.targetY - t.dispY) * ease;
+    t.dispW += (t.targetW - t.dispW) * ease;
+    t.dispH += (t.targetH - t.dispH) * ease;
+  });
+}
+
+export function getTrackBox(track, paddingPercent = 20) {
+  if (!track || track.enabled === false) return null;
   const p = (paddingPercent !== undefined ? paddingPercent : 20) / 100;
-  const w = box.w * (1 + p);
-  const h = box.h * (1 + p * 1.15);
-  const x = box.x - (w - box.w) / 2;
-  const y = box.y - (h - box.h) / 2;
-
+  const w = Math.max(10, track.dispW * (1 + p));
+  const h = Math.max(10, track.dispH * (1 + p * 1.15));
+  const x = track.dispX - w / 2;
+  const y = track.dispY - h / 2;
   return { x, y, w, h };
 }
