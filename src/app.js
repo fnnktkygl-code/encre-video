@@ -648,6 +648,25 @@ import { initPWA } from './pwa.js';
     clearOverlay();
   });
 
+  // Direct On-Canvas Click Eraser (Click any unwanted blur to delete it instantly)
+  overlay.addEventListener('click', (e) => {
+    if (!state.hasVideo || state.editMode !== 'lecture' || state.tool === 'pan') return;
+    const pt = getCanvasPoint(e, overlay);
+    const t = videoEl.currentTime;
+
+    for (let i = faceTracks.length - 1; i >= 0; i--) {
+      const track = faceTracks[i];
+      if (track.deleted || track.enabled === false) continue;
+      const box = getInterpolatedFaceBox(track, t, state.facePadding);
+      if (box && pt.x >= box.x && pt.x <= box.x + box.w && pt.y >= box.y && pt.y <= box.y + box.h) {
+        track.deleted = true;
+        updateFaceUI();
+        triggerHaptic();
+        break;
+      }
+    }
+  });
+
   // Video Render Loop (Silky 60 FPS playback with zero inference lag)
   function loop() {
     if (state.hasVideo && videoEl.readyState >= 2) {

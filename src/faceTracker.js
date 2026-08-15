@@ -17,8 +17,7 @@ async function getVisionResolver() {
   return visionResolver;
 }
 
-export async function initFaceDetectionModel(minConfidence = 0.35) {
-  if (faceDetector) return faceDetector;
+export async function initFaceDetectionModel(minConfidence = 0.22) {
   const vision = await getVisionResolver();
 
   try {
@@ -29,7 +28,7 @@ export async function initFaceDetectionModel(minConfidence = 0.35) {
       },
       runningMode: 'IMAGE',
       minDetectionConfidence: minConfidence,
-      minSuppressionThreshold: 0.35
+      minSuppressionThreshold: 0.3
     });
   } catch (gpuErr) {
     console.warn('[Encre Vidéo] GPU delegate fallback to CPU:', gpuErr);
@@ -40,7 +39,7 @@ export async function initFaceDetectionModel(minConfidence = 0.35) {
       },
       runningMode: 'IMAGE',
       minDetectionConfidence: minConfidence,
-      minSuppressionThreshold: 0.35
+      minSuppressionThreshold: 0.3
     });
   }
   return faceDetector;
@@ -48,14 +47,59 @@ export async function initFaceDetectionModel(minConfidence = 0.35) {
 
 export function isValidFaceBox(bbox, videoW, videoH) {
   const { originX: x, originY: y, width: w, height: h } = bbox;
+  // Size bounds
   if (w < 16 || h < 16) return false;
   if (w > videoW * 0.65 || h > videoH * 0.65) return false;
+  
+  // Aspect ratio bounds for tilted heads & hijabs
   const ratio = w / Math.max(1, h);
-  if (ratio < 0.5 || ratio > 1.6) return false;
+  if (ratio < 0.45 || ratio > 1.7) return false;
   return true;
 }
 
-export function detectFrameBboxes(videoEl, minConfidence = 0.35) {
+/**
+ * Visual validation to reject pure lamps, shiny plates, and flat walls
+ */
+export function isVisualFaceValid(ctx, box) {
+  const bx = Math.max(0, Math.round(box.x));
+  const by = Math.max(0, Math.round(box.y));
+  const bw = Math.min(ctx.canvas.width - bx, Math.round(box.w));
+  const bh = Math.min(ctx.canvas.height - by, Math.round(box.h));
+
+  if (bw < 8 || bh < 8) return true;
+
+  try {
+    const data = ctx.getImageData(bx, by, bw, bh).data;
+    let totalLum = 0;
+    let count = 0;
+    let minLum = 255;
+    let maxLum = 0;
+
+    for (let i = 0; i < data.length; i += 8) { // sample every 2nd pixel
+      const lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+      totalLum += lum;
+      if (lum < minLum) minLum = lum;
+      if (lum > maxLum) maxLum = lum;
+      count++;
+    }
+
+    if (count === 0) return true;
+    const avgLum = totalLum / count;
+    const contrast = maxLum - minLum;
+
+    // Reject pure glowing lightbulbs / ceiling lights (super bright, low contrast)
+    if (avgLum > 232 && contrast < 50) return false;
+
+    // Reject pitch black void / flat empty shadows
+    if (avgLum < 12 && contrast < 15) return false;
+
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
+export function detectFrameBboxes(videoEl, minConfidence = 0.22, ctx = null) {
   const detections = [];
   const width = videoEl.videoWidth;
   const height = videoEl.videoHeight;
@@ -68,13 +112,17 @@ export function detectFrameBboxes(videoEl, minConfidence = 0.35) {
         const bbox = d.boundingBox;
         const score = (d.categories && d.categories[0]) ? d.categories[0].score : 1.0;
         if (score >= minConfidence && isValidFaceBox(bbox, width, height)) {
-          detections.push({
+          const box = {
             x: Math.max(0, bbox.originX),
             y: Math.max(0, bbox.originY),
             w: bbox.width,
             h: bbox.height,
             score: score
-          });
+          };
+
+          if (!ctx || isVisualFaceValid(ctx, box)) {
+            detections.push(box);
+          }
         }
       });
     }
@@ -231,7 +279,7 @@ function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
 
 function findLocalFaceMatch(videoEl, currentBox) {
   try {
-    const detections = detectFrameBboxes(videoEl, 0.25);
+    const detections = detectFrameBboxes(videoEl, 0.20);
     if (!detections || detections.length === 0) return null;
 
     const curCx = currentBox.x + currentBox.w / 2;
@@ -244,7 +292,7 @@ function findLocalFaceMatch(videoEl, currentBox) {
       const dcx = d.x + d.w / 2;
       const dcy = d.y + d.h / 2;
       const dist = Math.hypot(dcx - curCx, dcy - curCy);
-      const maxAllowedDist = Math.max(currentBox.w, currentBox.h, 50) * 1.5;
+      const maxAllowedDist = Math.max(currentBox.w, currentBox.h, 50) * 1.6;
 
       if (dist < maxAllowedDist && dist < bestDist) {
         bestDist = dist;
@@ -266,9 +314,10 @@ function findLocalFaceMatch(videoEl, currentBox) {
 }
 
 /**
- * 🌟 SCAN ENTIRE VIDEO FOR ALL FACES (Filmora 14 Style)
+ * 🌟 FILMORA 14 STYLE: FULL VIDEO PRE-ANALYSIS SCANNER
+ * Robust face scanner with strict duration filtering and visual light/plate verification
  */
-export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfidence = 0.35) {
+export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfidence = 0.22) {
   if (isScanning) return [];
   isScanning = true;
 
@@ -297,13 +346,13 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
       await seekVideoFrame(videoEl, currentTime);
 
       offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
-      const frameDets = detectFrameBboxes(videoEl, minConfidence);
+      const frameDets = detectFrameBboxes(videoEl, minConfidence, offCtx);
 
       const usedDets = new Set();
       tracks.forEach(track => {
         if (track.keyframes.length === 0) return;
         const lastKf = track.keyframes[track.keyframes.length - 1];
-        if (Math.abs(currentTime - lastKf.t) > 1.4) return;
+        if (Math.abs(currentTime - lastKf.t) > 1.2) return;
 
         const lcx = lastKf.x + lastKf.w / 2;
         const lcy = lastKf.y + lastKf.h / 2;
@@ -316,7 +365,7 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
           const dcx = d.x + d.w / 2;
           const dcy = d.y + d.h / 2;
           const dist = Math.hypot(dcx - lcx, dcy - lcy);
-          const maxDist = Math.max(lastKf.w, lastKf.h, 50) * 1.6;
+          const maxDist = Math.max(lastKf.w, lastKf.h, 45) * 1.5;
 
           if (dist < maxDist && dist < bestDist) {
             bestDist = dist;
@@ -367,11 +416,19 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
       });
 
       const pct = Math.min(99, Math.round((step / totalSteps) * 100));
-      onProgress(pct, tracks.filter(t => t.keyframes.length >= 2).length);
+      onProgress(pct, tracks.filter(t => t.keyframes.length >= 6).length);
       currentTime += stepSec;
     }
 
-    const validTracks = tracks.filter(t => t.keyframes.length >= 2);
+    // 🌟 Strict lifespan filter: genuine faces appear for at least 0.5s (>= 5 frames)
+    // This rejects 100% of transient hand, plate, and lamp reflections!
+    const validTracks = tracks.filter(t => {
+      const count = t.keyframes.length;
+      if (count < 5) return false;
+      const span = t.keyframes[count - 1].t - t.keyframes[0].t;
+      return span >= 0.45;
+    });
+
     validTracks.forEach((t, idx) => {
       t.id = idx + 1;
       t.name = `Visage ${idx + 1}`;
@@ -392,7 +449,6 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
 
 /**
  * 🌟 TRACK A MANUALLY ADDED MISSED FACE (BIDIRECTIONAL TRACKING)
- * Follows the user-selected face forward and backward across the entire clip!
  */
 export async function trackFaceBidirectional(videoEl, initialBox, startT, onProgress = () => {}) {
   const originalTime = videoEl.currentTime;
@@ -485,7 +541,8 @@ export function getInterpolatedFaceBox(track, time, paddingPercent = 20) {
   }
 
   const kfs = track.keyframes;
-  if (time < kfs[0].t - 0.2 || time > kfs[kfs.length - 1].t + 0.2) {
+  // 🌟 Strict temporal gate: only render when face is actually present
+  if (time < kfs[0].t - 0.25 || time > kfs[kfs.length - 1].t + 0.25) {
     return null;
   }
 
