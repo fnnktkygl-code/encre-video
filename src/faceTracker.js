@@ -1,35 +1,32 @@
 "use strict";
 
-import { FaceDetector, FilesetResolver } from '@mediapipe/tasks-vision';
+import { FaceDetector, PoseLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+import { ByteTracker } from './byteTracker.js';
 
 let faceDetector = null;
-let currentModelType = 'full'; // 'full' | 'short'
-let detecting = false;
-let lastDetectionTime = 0;
-const DETECTION_INTERVAL_MS = 100; // 10 FPS detection rate for smooth video tracking
+let poseLandmarker = null;
+let visionResolver = null;
+let isScanning = false;
 
-export async function initFaceDetectionModel(modelType = 'full', minConfidence = 0.25) {
-  if (faceDetector && currentModelType === modelType) {
-    return faceDetector;
-  }
-
-  currentModelType = modelType;
-  const modelFile = modelType === 'short'
-    ? 'blaze_face_short_range.tflite'
-    : 'blaze_face_full_range.tflite';
-
-  let vision = null;
+async function getVisionResolver() {
+  if (visionResolver) return visionResolver;
   try {
-    vision = await FilesetResolver.forVisionTasks('/wasm/mediapipe');
-  } catch (localWasmErr) {
-    console.warn('[Encre Vidéo] Local wasm load failed, trying CDN fallback:', localWasmErr);
-    vision = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm');
+    visionResolver = await FilesetResolver.forVisionTasks('/wasm/mediapipe');
+  } catch (localErr) {
+    console.warn('[Encre Vidéo] Local wasm load failed, fallback to CDN:', localErr);
+    visionResolver = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm');
   }
+  return visionResolver;
+}
+
+export async function initFaceDetectionModel(minConfidence = 0.2) {
+  if (faceDetector) return faceDetector;
+  const vision = await getVisionResolver();
 
   try {
     faceDetector = await FaceDetector.createFromOptions(vision, {
       baseOptions: {
-        modelAssetPath: `/model/mediapipe/${modelFile}`,
+        modelAssetPath: '/model/mediapipe/blaze_face_full_range.tflite',
         delegate: 'GPU'
       },
       runningMode: 'VIDEO',
@@ -37,157 +34,263 @@ export async function initFaceDetectionModel(modelType = 'full', minConfidence =
       minSuppressionThreshold: 0.3
     });
   } catch (gpuErr) {
-    console.warn('[Encre Vidéo] GPU delegate failed, falling back to CPU:', gpuErr);
-    try {
-      faceDetector = await FaceDetector.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: `/model/mediapipe/${modelFile}`,
-          delegate: 'CPU'
-        },
-        runningMode: 'VIDEO',
-        minDetectionConfidence: minConfidence,
-        minSuppressionThreshold: 0.3
-      });
-    } catch (cdnModelErr) {
-      console.warn('[Encre Vidéo] Local model failed, loading from Google CDN:', cdnModelErr);
-      const cdnUrl = modelType === 'short'
-        ? 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite'
-        : 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/1/blaze_face_full_range.tflite';
-
-      faceDetector = await FaceDetector.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: cdnUrl
-        },
-        runningMode: 'VIDEO',
-        minDetectionConfidence: minConfidence,
-        minSuppressionThreshold: 0.3
-      });
-    }
+    console.warn('[Encre Vidéo] GPU delegate fallback to CPU:', gpuErr);
+    faceDetector = await FaceDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: '/model/mediapipe/blaze_face_full_range.tflite',
+        delegate: 'CPU'
+      },
+      runningMode: 'VIDEO',
+      minDetectionConfidence: minConfidence,
+      minSuppressionThreshold: 0.3
+    });
   }
-
   return faceDetector;
 }
 
-export function paddedBox(track, paddingPercent) {
-  const p = (paddingPercent !== undefined ? paddingPercent : 20) / 100;
-  const w = Math.max(10, track.dispW * (1 + p));
-  const h = Math.max(10, track.dispH * (1 + p * 1.15));
-  const x = track.dispX - w / 2;
-  const y = track.dispY - h / 2;
-  return { x, y, w, h };
-}
-
-export async function maybeRunDetection(videoEl, videoTime, faceTracks, uuidFn, minConfidence = 0.25) {
-  if (!faceDetector || detecting || !videoEl || videoEl.readyState < 2) {
-    return faceTracks;
-  }
-
-  const now = performance.now();
-  if (now - lastDetectionTime < DETECTION_INTERVAL_MS) {
-    return faceTracks;
-  }
-  lastDetectionTime = now;
-  detecting = true;
+export async function initPoseLandmarker() {
+  if (poseLandmarker) return poseLandmarker;
+  const vision = await getVisionResolver();
 
   try {
-    const timestampMs = Math.round(videoTime * 1000) || Math.round(now);
-    const result = faceDetector.detectForVideo(videoEl, timestampMs);
-
-    if (!result || !result.detections) {
-      return faceTracks;
-    }
-
-    const preds = result.detections.map(d => {
-      const bbox = d.boundingBox;
-      return {
-        x: bbox.originX,
-        y: bbox.originY,
-        w: bbox.width,
-        h: bbox.height,
-        score: d.categories && d.categories[0] ? d.categories[0].score : 1.0
-      };
+    poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: '/model/mediapipe/pose_landmarker.task',
+        delegate: 'GPU'
+      },
+      runningMode: 'VIDEO',
+      numPoses: 6,
+      minPoseDetectionConfidence: 0.3,
+      minPosePresenceConfidence: 0.3,
+      minTrackingConfidence: 0.3
     });
-
-    return matchTracks(preds, videoTime, faceTracks, uuidFn);
   } catch (err) {
-    console.warn('[Encre Vidéo] MediaPipe detection error:', err);
-    return faceTracks;
-  } finally {
-    detecting = false;
+    console.warn('[Encre Vidéo] Pose Landmarker GPU init error, using CPU:', err);
+    try {
+      poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: '/model/mediapipe/pose_landmarker.task',
+          delegate: 'CPU'
+        },
+        runningMode: 'VIDEO',
+        numPoses: 6,
+        minPoseDetectionConfidence: 0.3,
+        minPosePresenceConfidence: 0.3,
+        minTrackingConfidence: 0.3
+      });
+    } catch (e2) {
+      console.warn('[Encre Vidéo] Pose Landmarker unavailable, using pure Face detection:', e2);
+    }
   }
+  return poseLandmarker;
 }
 
-export function matchTracks(preds, videoTime, faceTracks, uuidFn) {
-  const used = new Array(faceTracks.length).fill(false);
-  const updatedTracks = [...faceTracks];
+/**
+ * Extracts candidate head/face bounding boxes from a single video frame
+ */
+export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
+  const detections = [];
+  const width = videoEl.videoWidth;
+  const height = videoEl.videoHeight;
 
-  if (Array.isArray(preds)) {
-    preds.forEach((p) => {
-      const cx = p.x + p.w / 2;
-      const cy = p.y + p.h / 2;
-      const w = p.w;
-      const h = p.h;
-
-      let bestIdx = -1;
-      let bestDist = Infinity;
-
-      updatedTracks.forEach((t, i) => {
-        if (used[i]) return;
-        // Predicted position based on previous velocity
-        const dt = Math.max(0, videoTime - t.lastSeen);
-        const predX = t.targetX + (t.vx || 0) * dt;
-        const predY = t.targetY + (t.vy || 0) * dt;
-        const d = Math.hypot(predX - cx, predY - cy);
-
-        if (d < bestDist) {
-          bestDist = d;
-          bestIdx = i;
-        }
-      });
-
-      const threshold = Math.max(w, h, 60) * 1.5;
-      if (bestIdx !== -1 && bestDist < threshold) {
-        const t = updatedTracks[bestIdx];
-        const dt = Math.max(0.01, videoTime - t.lastSeen);
-        t.vx = (cx - t.targetX) / dt;
-        t.vy = (cy - t.targetY) / dt;
-        t.targetX = cx;
-        t.targetY = cy;
-        t.targetW = w;
-        t.targetH = h;
-        t.lastSeen = videoTime;
-        t.misses = 0;
-        used[bestIdx] = true;
-      } else {
-        updatedTracks.push({
-          id: uuidFn ? uuidFn() : 'face-' + Date.now() + '-' + Math.random().toString(16).slice(2),
-          targetX: cx,
-          targetY: cy,
-          targetW: w,
-          targetH: h,
-          dispX: cx,
-          dispY: cy,
-          dispW: w,
-          dispH: h,
-          vx: 0,
-          vy: 0,
-          lastSeen: videoTime,
-          misses: 0
+  // 1. Face Detector Pass (High Precision for visible faces)
+  if (faceDetector) {
+    try {
+      const faceResult = faceDetector.detectForVideo(videoEl, timeMs);
+      if (faceResult && faceResult.detections) {
+        faceResult.detections.forEach(d => {
+          const bbox = d.boundingBox;
+          detections.push({
+            x: bbox.originX,
+            y: bbox.originY,
+            w: bbox.width,
+            h: bbox.height,
+            score: (d.categories && d.categories[0]) ? d.categories[0].score : 0.85,
+            source: 'face'
+          });
         });
       }
-    });
+    } catch (e) {}
   }
 
-  // Coast forward briefly if missed, keep track for up to 1.8 seconds
-  return updatedTracks.filter((t) => Math.abs(videoTime - t.lastSeen) < 1.8);
+  // 2. Pose Landmarker Pass (Extracts head boxes even for turned/occluded heads)
+  if (poseLandmarker) {
+    try {
+      const poseResult = poseLandmarker.detectForVideo(videoEl, timeMs);
+      if (poseResult && poseResult.landmarks) {
+        poseResult.landmarks.forEach(landmarks => {
+          if (!landmarks || landmarks.length < 13) return;
+
+          // Keypoints: 0=Nose, 7=Left Ear, 8=Right Ear, 11=Left Shoulder, 12=Right Shoulder
+          const nose = landmarks[0];
+          const leftEar = landmarks[7];
+          const rightEar = landmarks[8];
+          const leftShoulder = landmarks[11];
+          const rightShoulder = landmarks[12];
+
+          // Compute head center & dimensions from pose
+          const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+          const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
+          const shoulderDist = Math.hypot(
+            (leftShoulder.x - rightShoulder.x) * width,
+            (leftShoulder.y - rightShoulder.y) * height
+          );
+
+          // Head width is typically ~50% of shoulder width
+          const headW = Math.max(25, shoulderDist * 0.55);
+          const headH = headW * 1.2;
+
+          let headCenterX = (nose.visibility > 0.4 ? nose.x : shoulderMidX) * width;
+          let headCenterY = (nose.visibility > 0.4 ? nose.y : (shoulderMidY - (headH / height) * 0.7)) * height;
+
+          const candidate = {
+            x: headCenterX - headW / 2,
+            y: headCenterY - headH / 2,
+            w: headW,
+            h: headH,
+            score: 0.65,
+            source: 'pose_head'
+          };
+
+          // Check if this head is already covered by a high-confidence face detection
+          const alreadyCovered = detections.some(d => {
+            const overlapX = Math.abs((d.x + d.w / 2) - headCenterX);
+            const overlapY = Math.abs((d.y + d.h / 2) - headCenterY);
+            return overlapX < Math.max(d.w, headW) * 0.8 && overlapY < Math.max(d.h, headH) * 0.8;
+          });
+
+          if (!alreadyCovered) {
+            detections.push(candidate);
+          }
+        });
+      }
+    } catch (e) {}
+  }
+
+  return detections;
 }
 
-export function smoothTracks(faceTracks) {
-  const ease = 0.45;
-  faceTracks.forEach((t) => {
-    t.dispX += (t.targetX - t.dispX) * ease;
-    t.dispY += (t.targetY - t.dispY) * ease;
-    t.dispW += (t.targetW - t.dispW) * ease;
-    t.dispH += (t.targetH - t.dispH) * ease;
-  });
+/**
+ * 🚀 CAPCUT-GRADE OFFLINE VIDEO SCANNER
+ * Performs a complete temporal analysis pass across the whole video with ByteTrack.
+ */
+export async function scanAndTrackVideo(videoEl, onProgress = () => {}) {
+  if (isScanning) return [];
+  isScanning = true;
+
+  try {
+    await initFaceDetectionModel(0.2);
+    await initPoseLandmarker();
+
+    const originalTime = videoEl.currentTime;
+    const originalPaused = videoEl.paused;
+    videoEl.pause();
+
+    const duration = videoEl.duration || 10;
+    const stepSec = 0.08; // Sample at 12.5 FPS for accurate temporal resolution
+    const totalSteps = Math.ceil(duration / stepSec);
+
+    const tracker = new ByteTracker(0.4, 0.15, 2.2);
+    let currentTime = 0;
+    let step = 0;
+
+    while (currentTime <= duration) {
+      step++;
+      const timeMs = Math.round(currentTime * 1000);
+
+      // Seek video to exact frame
+      await new Promise(resolve => {
+        const onSeeked = () => {
+          videoEl.removeEventListener('seeked', onSeeked);
+          resolve();
+        };
+        videoEl.addEventListener('seeked', onSeeked);
+        videoEl.currentTime = currentTime;
+      });
+
+      // Detect in frame
+      const frameDets = await detectFrameBboxes(videoEl, timeMs, 0.2);
+
+      // Associate with ByteTrack
+      tracker.update(frameDets, currentTime);
+
+      const pct = Math.min(99, Math.round((step / totalSteps) * 100));
+      onProgress(pct, tracker.tracks.length);
+
+      currentTime += stepSec;
+    }
+
+    // Bidirectional smoothing & interpolation
+    const finalizedTracks = tracker.finalizeTrajectories();
+
+    // Filter out micro-false positives (tracks that only appeared for < 0.2s)
+    const validTracks = finalizedTracks.filter(t => t.keyframes.length >= 3);
+
+    // Restore original video state
+    videoEl.currentTime = originalTime;
+    if (!originalPaused) videoEl.play();
+    onProgress(100, validTracks.length);
+
+    return validTracks;
+  } catch (err) {
+    console.error('[Encre Vidéo] Video scanning error:', err);
+    throw err;
+  } finally {
+    isScanning = false;
+  }
+}
+
+/**
+ * Get interpolated bounding box for a track at any video timestamp
+ */
+export function getInterpolatedBoxAt(track, time, paddingPercent = 20) {
+  if (!track || !track.enabled || !track.keyframes || track.keyframes.length === 0) {
+    return null;
+  }
+
+  const kfs = track.keyframes;
+  if (time < kfs[0].t - 0.2 || time > kfs[kfs.length - 1].t + 0.2) {
+    return null;
+  }
+
+  let box = null;
+  if (time <= kfs[0].t) {
+    box = kfs[0];
+  } else if (time >= kfs[kfs.length - 1].t) {
+    box = kfs[kfs.length - 1];
+  } else {
+    // Binary search for closest keyframe interval
+    let low = 0;
+    let high = kfs.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (kfs[mid].t <= time && (mid === kfs.length - 1 || kfs[mid + 1].t >= time)) {
+        const a = kfs[mid];
+        const b = kfs[mid + 1] || a;
+        const dt = Math.max(0.0001, b.t - a.t);
+        const f = (time - a.t) / dt;
+        box = {
+          x: a.x + (b.x - a.x) * f,
+          y: a.y + (b.y - a.y) * f,
+          w: a.w + (b.w - a.w) * f,
+          h: a.h + (b.h - a.h) * f
+        };
+        break;
+      } else if (kfs[mid].t < time) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+  }
+
+  if (!box) return null;
+
+  const p = (paddingPercent !== undefined ? paddingPercent : 20) / 100;
+  const w = box.w * (1 + p);
+  const h = box.h * (1 + p * 1.15);
+  const x = box.x - (w - box.w) / 2;
+  const y = box.y - (h - box.h) / 2;
+
+  return { x, y, w, h };
 }

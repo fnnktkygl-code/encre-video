@@ -69,25 +69,35 @@
 
     <aside id="side-panel" class="hidden">
       <div class="panel-section">
-        <h2>Détection IA des Visages</h2>
-        <p class="hint">Google MediaPipe Vision (Haute précision &amp; multi-visages). 100% local dans votre navigateur.</p>
-        <button class="panel-btn" id="face-toggle-btn">Activer la détection automatique</button>
+        <h2>⚡ IA Suivi Vidéo Pro (ByteTrack)</h2>
+        <p class="hint">Analyse complète image par image (Visages + Têtes/Corps). Lisse les trajectoires et ne perd jamais le suivi, même si la personne tourne la tête ou bouge.</p>
         
-        <div id="ai-controls" style="display:none; margin-top: 12px;">
-          <div class="field">
-            <label for="ai-model-select">Portée IA</label>
-            <select id="ai-model-select" style="width: 100%; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12px;">
-              <option value="full">🌍 Multi-Visages &amp; Foules (Full-Range)</option>
-              <option value="short">👤 Gros Plan / Selfie (Short-Range)</option>
-            </select>
-          </div>
+        <button class="panel-btn primary" id="scan-video-btn" style="padding: 10px; font-size: 13px; font-weight: bold; margin-bottom: 8px;">
+          ⚡ Scanner &amp; Tracker toute la vidéo
+        </button>
 
-          <div class="field">
-            <label for="conf-range">Sensibilité</label>
-            <input type="range" id="conf-range" min="10" max="70" value="25">
-            <span class="val" id="conf-val">25%</span>
+        <!-- Scan Progress Bar -->
+        <div id="scan-progress-box" style="display:none; margin-bottom: 10px; padding: 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: 8px;">
+          <div style="display:flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+            <span id="scan-status-text" style="color: var(--accent); font-weight: bold;">Analyse temporelle en cours…</span>
+            <span id="scan-pct-text">0%</span>
           </div>
+          <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+            <div id="scan-progress-bar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.1s;"></div>
+          </div>
+        </div>
 
+        <button class="panel-btn" id="face-toggle-btn">Activer le masquage automatique</button>
+
+        <div id="detected-persons-box" style="display:none; margin-top: 12px;">
+          <div style="font-size: 12px; font-weight: bold; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+            <span>Personnes suivies</span>
+            <span id="person-count-badge" style="font-size: 10px; padding: 2px 6px; background: var(--accent); color: #000; border-radius: 10px; font-weight: bold;">0</span>
+          </div>
+          <div id="person-chip-list" style="display: flex; flex-wrap: wrap; gap: 6px; max-height: 140px; overflow-y: auto;"></div>
+        </div>
+        
+        <div id="ai-controls" style="margin-top: 12px;">
           <div class="field">
             <label for="padding-range">Marge du Masque</label>
             <input type="range" id="padding-range" min="0" max="60" value="20">
@@ -98,7 +108,7 @@
 
       <div class="panel-section">
         <h2>Repères Manuels &amp; Suivi</h2>
-        <p class="hint">Floutez plusieurs visages ou objets spécifiques avec suivi automatique ou par images-clés.</p>
+        <p class="hint">Floutez manuellement n'importe quel visage, corps ou objet avec suivi optique de mouvement.</p>
         <div style="display: flex; gap: 8px; margin-bottom: 10px;">
           <button class="panel-btn" id="marker-mode-btn" style="flex: 1;">Mode « Repère »</button>
           <button class="btn secondary" id="new-track-btn" title="Ajouter un nouveau repère distinct" style="padding: 0 12px; font-size: 12px;">+ Nouveau</button>

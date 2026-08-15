@@ -16,8 +16,8 @@ export function renderVideoFrame(
   state,
   faceTracks,
   manualTracks,
-  paddedBoxFn,
-  interpolateTrackFn
+  getInterpolatedBoxFn,
+  interpolateManualTrackFn
 ) {
   if (!state.hasVideo || videoEl.readyState < 2) return;
 
@@ -27,27 +27,31 @@ export function renderVideoFrame(
     const rawFrame = cloneCanvas(workCanvas);
     const t = videoEl.currentTime;
 
-    // Apply auto face detection masks
-    if (state.faceDetectionEnabled && faceTracks.length > 0) {
+    // Apply auto face/head detection masks from ByteTrack
+    if (state.faceDetectionEnabled && faceTracks && faceTracks.length > 0) {
       faceTracks.forEach((track) => {
-        const box = paddedBoxFn(track, state.facePadding);
-        applyToClippedRect(
-          workCtx,
-          rawFrame,
-          box.x,
-          box.y,
-          box.w,
-          box.h,
-          state.mode,
-          { color: state.color, blurRadius: state.blurRadius, pixelSize: state.pixelSize }
-        );
+        if (track.enabled === false) return;
+        const box = getInterpolatedBoxFn(track, t, state.facePadding);
+        if (box) {
+          applyToClippedRect(
+            workCtx,
+            rawFrame,
+            box.x,
+            box.y,
+            box.w,
+            box.h,
+            state.mode,
+            { color: state.color, blurRadius: state.blurRadius, pixelSize: state.pixelSize }
+          );
+        }
       });
     }
 
     // Apply manual keyframe track masks
     if (manualTracks && manualTracks.length > 0) {
       manualTracks.forEach((track) => {
-        const box = interpolateTrackFn(track, t);
+        if (track.enabled === false) return;
+        const box = interpolateManualTrackFn(track, t);
         if (box) {
           applyToClippedRect(
             workCtx,

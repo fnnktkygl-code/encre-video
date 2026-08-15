@@ -9,9 +9,8 @@ import {
 import { setupGestures } from './gestures.js';
 import {
   initFaceDetectionModel,
-  maybeRunDetection,
-  smoothTracks,
-  paddedBox
+  scanAndTrackVideo,
+  getInterpolatedBoxAt
 } from './faceTracker.js';
 import {
   upsertKeyframe,
@@ -35,8 +34,6 @@ import { initPWA } from './pwa.js';
     blurRadius: 20,
     pixelSize: 16,
     facePadding: 20,
-    minConfidence: 0.25,
-    modelType: 'full',     // 'full' (crowds/distance) | 'short' (selfie/closeup)
     faceDetectionEnabled: false,
     faceModelLoaded: false,
     faceModelLoading: false,
@@ -78,11 +75,17 @@ import { initPWA } from './pwa.js';
   const timeLabel = document.getElementById('time-label');
   const playBtn = document.getElementById('play-btn');
   const playIcon = document.getElementById('play-icon');
+  
+  const scanVideoBtn = document.getElementById('scan-video-btn');
+  const scanProgressBox = document.getElementById('scan-progress-box');
+  const scanStatusText = document.getElementById('scan-status-text');
+  const scanPctText = document.getElementById('scan-pct-text');
+  const scanProgressBar = document.getElementById('scan-progress-bar');
+  const detectedPersonsBox = document.getElementById('detected-persons-box');
+  const personCountBadge = document.getElementById('person-count-badge');
+  const personChipList = document.getElementById('person-chip-list');
+
   const faceToggleBtn = document.getElementById('face-toggle-btn');
-  const aiControls = document.getElementById('ai-controls');
-  const aiModelSelect = document.getElementById('ai-model-select');
-  const confRange = document.getElementById('conf-range');
-  const confVal = document.getElementById('conf-val');
   const paddingRange = document.getElementById('padding-range');
   const paddingVal = document.getElementById('padding-val');
   const markerModeBtn = document.getElementById('marker-mode-btn');
@@ -139,8 +142,8 @@ import { initPWA } from './pwa.js';
 
   // Stamp and Face Status UI
   function updateStamp() {
-    if (state.faceModelLoaded) {
-      stampEl.innerHTML = '<span class="dot"></span>MediaPipe IA Vision — Détection active';
+    if (state.faceDetectionEnabled) {
+      stampEl.innerHTML = '<span class="dot"></span>MediaPipe &amp; ByteTrack — Suivi actif';
     } else {
       stampEl.innerHTML = '<span class="dot"></span>100% local — aucun réseau';
     }
@@ -148,69 +151,108 @@ import { initPWA } from './pwa.js';
 
   function updateFaceUI() {
     if (state.faceModelLoading) {
-      faceToggleBtn.textContent = 'Chargement de l\'IA MediaPipe…';
+      faceToggleBtn.textContent = 'Chargement de l\'IA…';
       faceToggleBtn.disabled = true;
     } else if (state.faceModelLoaded) {
       faceToggleBtn.disabled = false;
-      faceToggleBtn.textContent = state.faceDetectionEnabled ? 'Détection active — désactiver' : 'Activer la détection automatique';
+      faceToggleBtn.textContent = state.faceDetectionEnabled ? 'Masquage auto actif — désactiver' : 'Activer le masquage automatique';
       faceToggleBtn.classList.toggle('on', state.faceDetectionEnabled);
-      if (aiControls) aiControls.style.display = state.faceDetectionEnabled ? '' : 'none';
     } else {
       faceToggleBtn.disabled = false;
-      faceToggleBtn.textContent = 'Activer la détection automatique';
-      if (aiControls) aiControls.style.display = 'none';
+      faceToggleBtn.textContent = 'Activer le masquage automatique';
     }
     faceStatusLabel.textContent = state.faceDetectionEnabled
-      ? `${faceTracks.length} visage(s) détecté(s)`
+      ? `${faceTracks.filter(t => t.enabled !== false).length} personne(s) masquée(s)`
       : '';
     updateStamp();
   }
 
-  async function enableFaceDetection() {
-    if (state.faceModelLoaded) {
-      state.faceDetectionEnabled = !state.faceDetectionEnabled;
-      if (!state.faceDetectionEnabled) faceTracks = [];
-      updateFaceUI();
+  function renderPersonChips() {
+    if (!personChipList) return;
+    personChipList.innerHTML = '';
+    if (!faceTracks || faceTracks.length === 0) {
+      if (detectedPersonsBox) detectedPersonsBox.style.display = 'none';
       return;
     }
-    if (state.faceModelLoading) return;
-    state.faceModelLoading = true;
-    updateFaceUI();
-    try {
-      await initFaceDetectionModel(state.modelType, state.minConfidence);
-      state.faceModelLoaded = true;
-      state.faceDetectionEnabled = true;
-    } catch (err) {
-      console.error(err);
-      window.alert("Impossible de charger le modèle MediaPipe Vision. Vérifiez votre connexion internet pour le chargement initial.");
-    } finally {
-      state.faceModelLoading = false;
-      updateFaceUI();
-    }
+    if (detectedPersonsBox) detectedPersonsBox.style.display = '';
+    if (personCountBadge) personCountBadge.textContent = faceTracks.length;
+
+    faceTracks.forEach(track => {
+      const chip = document.createElement('button');
+      const isEnabled = track.enabled !== false;
+      chip.style.cssText = `
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 5px 9px;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 6px;
+        cursor: pointer;
+        border: 1px solid ${isEnabled ? 'var(--accent)' : 'var(--border)'};
+        background: ${isEnabled ? 'rgba(0, 245, 212, 0.15)' : 'var(--surface)'};
+        color: ${isEnabled ? 'var(--accent)' : 'var(--text-muted)'};
+        transition: all 0.15s ease;
+      `;
+      chip.innerHTML = `${isEnabled ? '👁️' : '🚫'} ${track.name || 'Personne ' + track.id}`;
+      chip.title = isEnabled ? 'Masquage actif (cliquer pour exclure)' : 'Exclu du masquage (cliquer pour activer)';
+      chip.addEventListener('click', () => {
+        track.enabled = !isEnabled;
+        renderPersonChips();
+        updateFaceUI();
+      });
+      personChipList.appendChild(chip);
+    });
   }
 
-  faceToggleBtn.addEventListener('click', enableFaceDetection);
+  if (scanVideoBtn) {
+    scanVideoBtn.addEventListener('click', async () => {
+      if (!state.hasVideo) {
+        window.alert("Veuillez d'abord ouvrir une vidéo.");
+        return;
+      }
+      scanVideoBtn.disabled = true;
+      if (scanProgressBox) scanProgressBox.style.display = '';
 
-  if (aiModelSelect) {
-    aiModelSelect.addEventListener('change', async (e) => {
-      state.modelType = e.target.value;
-      if (state.faceModelLoaded) {
-        state.faceModelLoading = true;
+      try {
+        const validTracks = await scanAndTrackVideo(videoEl, (pct, count) => {
+          if (scanProgressBar) scanProgressBar.style.width = pct + '%';
+          if (scanPctText) scanPctText.textContent = pct + '%';
+          if (scanStatusText) scanStatusText.textContent = `Analyse temporelle : ${count} personne(s) suivie(s)…`;
+        });
+
+        faceTracks = validTracks;
+        state.faceDetectionEnabled = true;
+        state.faceModelLoaded = true;
         updateFaceUI();
-        await initFaceDetectionModel(state.modelType, state.minConfidence);
-        state.faceModelLoading = false;
-        updateFaceUI();
+        renderPersonChips();
+
+        if (scanStatusText) scanStatusText.textContent = `✅ Analyse terminée : ${validTracks.length} personne(s) suivie(s) !`;
+        setTimeout(() => {
+          if (scanProgressBox) scanProgressBox.style.display = 'none';
+        }, 3000);
+      } catch (err) {
+        console.error(err);
+        window.alert("Erreur lors de l'analyse vidéo : " + (err.message || err));
+        if (scanProgressBox) scanProgressBox.style.display = 'none';
+      } finally {
+        scanVideoBtn.disabled = false;
       }
     });
   }
 
-  if (confRange) {
-    confRange.addEventListener('input', (e) => {
-      const val = parseInt(e.target.value, 10);
-      state.minConfidence = val / 100;
-      if (confVal) confVal.textContent = val + '%';
-    });
+  async function enableFaceDetection() {
+    if (state.faceModelLoaded && faceTracks.length > 0) {
+      state.faceDetectionEnabled = !state.faceDetectionEnabled;
+      updateFaceUI();
+      renderPersonChips();
+      return;
+    }
+    // If no tracks scanned yet, trigger scan
+    if (scanVideoBtn) scanVideoBtn.click();
   }
+
+  faceToggleBtn.addEventListener('click', enableFaceDetection);
 
   if (paddingRange) {
     paddingRange.addEventListener('input', (e) => {
@@ -243,7 +285,7 @@ import { initPWA } from './pwa.js';
       return;
     }
 
-    manualTracks.forEach((track, idx) => {
+    manualTracks.forEach((track) => {
       const item = document.createElement('div');
       item.className = 'track-item' + (track.id === selectedManualTrackId ? ' selected' : '');
 
@@ -283,7 +325,7 @@ import { initPWA } from './pwa.js';
 
       const newTrack = {
         id: uuid(),
-        name: `Visage ${manualTracks.length + 1}`,
+        name: `Repère ${manualTracks.length + 1}`,
         keyframes: []
       };
       manualTracks.push(newTrack);
@@ -332,9 +374,10 @@ import { initPWA } from './pwa.js';
   markerModeBtn.addEventListener('click', () => {
     state.editMode = state.editMode === 'marker' ? 'lecture' : 'marker';
     markerModeBtn.classList.toggle('on', state.editMode === 'marker');
-    markerModeBtn.textContent = state.editMode === 'marker' ? 'Mode « Repère manuel » (actif)' : 'Mode « Repère manuel »';
+    markerModeBtn.textContent = state.editMode === 'marker' ? 'Mode « Repère » (actif)' : 'Mode « Repère »';
     overlay.classList.toggle('marker-mode', state.editMode === 'marker');
     if (state.editMode === 'marker' && !videoEl.paused) videoEl.pause();
+    renderManualTrackList();
   });
 
   // Tools & Modes UI
@@ -481,28 +524,8 @@ import { initPWA } from './pwa.js';
   });
 
   // Video Render Loop
-  let faceDetecting = false;
-
   function loop() {
     if (state.hasVideo && videoEl.readyState >= 2) {
-      if (state.faceDetectionEnabled && state.faceModelLoaded && !faceDetecting) {
-        faceDetecting = true;
-        maybeRunDetection(videoEl, videoEl.currentTime, faceTracks, uuid, state.minConfidence)
-          .then((newTracks) => {
-            faceTracks = newTracks;
-            smoothTracks(faceTracks);
-            faceDetecting = false;
-            if (faceStatusLabel) {
-              faceStatusLabel.textContent = `${faceTracks.length} visage(s) détecté(s)`;
-            }
-          })
-          .catch(() => {
-            faceDetecting = false;
-          });
-      } else if (state.faceDetectionEnabled && faceTracks.length > 0) {
-        smoothTracks(faceTracks);
-      }
-
       renderVideoFrame(
         videoEl,
         workCanvas,
@@ -510,7 +533,7 @@ import { initPWA } from './pwa.js';
         state,
         faceTracks,
         manualTracks,
-        paddedBox,
+        getInterpolatedBoxAt,
         interpolateTrack
       );
 
@@ -558,6 +581,7 @@ import { initPWA } from './pwa.js';
     manualTracks = [];
     selectedManualTrackId = null;
     renderManualTrackList();
+    renderPersonChips();
     videoEl.src = url;
     videoEl.load();
     state.hasVideo = true;
@@ -577,6 +601,11 @@ import { initPWA } from './pwa.js';
     updateTimeLabel();
     fitToScreen();
     startLoop();
+
+    // Auto-trigger pro video scan on first load
+    setTimeout(() => {
+      if (scanVideoBtn) scanVideoBtn.click();
+    }, 400);
   });
 
   videoEl.addEventListener('timeupdate', () => {
