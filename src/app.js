@@ -571,30 +571,41 @@ import { initPWA } from './pwa.js';
     // 🌟 Adding a missed face directly into AI Face Gallery with Bidirectional Tracking
     if (state.editMode === 'add-face' && markerStart) {
       const p = getCanvasPoint(e, overlay);
-      const x = Math.min(markerStart.x, p.x), y = Math.min(markerStart.y, p.y);
-      const w = Math.abs(p.x - markerStart.x), h = Math.abs(p.y - markerStart.y);
+      let x = Math.min(markerStart.x, p.x), y = Math.min(markerStart.y, p.y);
+      let w = Math.abs(p.x - markerStart.x), h = Math.abs(p.y - markerStart.y);
       clearOverlay();
       markerStart = null;
       state.editMode = 'lecture';
       if (addMissedFaceBtn) {
-        addMissedFaceBtn.textContent = '➕ Ajouter un visage manqué (Tracer & Suivre)';
+        addMissedFaceBtn.textContent = '➕ Flouter un visage / tête (1 Clic ou Tracer)';
         addMissedFaceBtn.style.background = '';
       }
       overlay.style.cursor = '';
 
-      if (w < 8 || h < 8) return;
+      let targetBox = { x, y, w, h };
+      if (w < 15 || h < 15) {
+        // User single-tapped on a person's head/cap: generate standard head box centered on click
+        const headW = Math.round(videoEl.videoWidth * 0.16);
+        const headH = Math.round(headW * 1.22);
+        targetBox = {
+          x: Math.max(0, Math.round(p.x - headW / 2)),
+          y: Math.max(0, Math.round(p.y - headH / 2)),
+          w: headW,
+          h: headH
+        };
+      }
 
       if (mosaicProgressBox) mosaicProgressBox.style.display = '';
-      if (mosaicStatusText) mosaicStatusText.textContent = '⚡ Traçage et suivi du visage sur la vidéo…';
+      if (mosaicStatusText) mosaicStatusText.textContent = '⚡ Traçage et suivi automatique du visage…';
 
-      trackFaceBidirectional(videoEl, { x, y, w, h }, videoEl.currentTime, (pct) => {
+      trackFaceBidirectional(videoEl, targetBox, videoEl.currentTime, (pct) => {
         if (mosaicProgressBar) mosaicProgressBar.style.width = pct + '%';
         if (mosaicPctText) mosaicPctText.textContent = pct + '%';
       }).then(result => {
         const id = faceTracks.length + 1;
         const newTrack = {
           id: id,
-          name: `Visage ${id} (Ajouté)`,
+          name: `Visage ${id} (Manuel)`,
           enabled: true,
           deleted: false,
           avatarUrl: result.avatarUrl,

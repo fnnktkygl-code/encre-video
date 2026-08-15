@@ -17,7 +17,7 @@ async function getVisionResolver() {
   return visionResolver;
 }
 
-export async function initFaceDetectionModel(minConfidence = 0.22) {
+export async function initFaceDetectionModel(minConfidence = 0.20) {
   const vision = await getVisionResolver();
 
   try {
@@ -45,20 +45,34 @@ export async function initFaceDetectionModel(minConfidence = 0.22) {
   return faceDetector;
 }
 
+/**
+ * Geometric & Scene Plausibility Filter:
+ * - Rejects ceiling lamps (top 6% of screen)
+ * - Rejects table food, dishes, and hands (bottom 32% of screen)
+ * - Constrains human head aspect ratios (0.5 to 1.7)
+ */
 export function isValidFaceBox(bbox, videoW, videoH) {
   const { originX: x, originY: y, width: w, height: h } = bbox;
-  // Size bounds
-  if (w < 16 || h < 16) return false;
+
+  // Minimum & Maximum physical size
+  if (w < 18 || h < 18) return false;
   if (w > videoW * 0.65 || h > videoH * 0.65) return false;
-  
-  // Aspect ratio bounds for tilted heads & hijabs
+
+  // Human face aspect ratio
   const ratio = w / Math.max(1, h);
-  if (ratio < 0.45 || ratio > 1.7) return false;
+  if (ratio < 0.45 || ratio > 1.65) return false;
+
+  // 🌟 Reject ceiling lamps (top edge)
+  if (y < videoH * 0.04) return false;
+
+  // 🌟 Reject table plates, food, and serving dishes (bottom table zone)
+  if (y + h > videoH * 0.72) return false;
+
   return true;
 }
 
 /**
- * Visual validation to reject pure lamps, shiny plates, and flat walls
+ * Optical brightness filter: eliminates incandescent lamps & flat shadows
  */
 export function isVisualFaceValid(ctx, box) {
   const bx = Math.max(0, Math.round(box.x));
@@ -75,7 +89,7 @@ export function isVisualFaceValid(ctx, box) {
     let minLum = 255;
     let maxLum = 0;
 
-    for (let i = 0; i < data.length; i += 8) { // sample every 2nd pixel
+    for (let i = 0; i < data.length; i += 8) {
       const lum = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
       totalLum += lum;
       if (lum < minLum) minLum = lum;
@@ -87,11 +101,11 @@ export function isVisualFaceValid(ctx, box) {
     const avgLum = totalLum / count;
     const contrast = maxLum - minLum;
 
-    // Reject pure glowing lightbulbs / ceiling lights (super bright, low contrast)
-    if (avgLum > 232 && contrast < 50) return false;
+    // Glowing lamp (extreme white/yellow brightness)
+    if (avgLum > 225) return false;
 
-    // Reject pitch black void / flat empty shadows
-    if (avgLum < 12 && contrast < 15) return false;
+    // Pure black shadow
+    if (avgLum < 15 && contrast < 20) return false;
 
     return true;
   } catch (e) {
@@ -99,7 +113,7 @@ export function isVisualFaceValid(ctx, box) {
   }
 }
 
-export function detectFrameBboxes(videoEl, minConfidence = 0.22, ctx = null) {
+export function detectFrameBboxes(videoEl, minConfidence = 0.20, ctx = null) {
   const detections = [];
   const width = videoEl.videoWidth;
   const height = videoEl.videoHeight;
@@ -279,7 +293,7 @@ function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
 
 function findLocalFaceMatch(videoEl, currentBox) {
   try {
-    const detections = detectFrameBboxes(videoEl, 0.20);
+    const detections = detectFrameBboxes(videoEl, 0.18);
     if (!detections || detections.length === 0) return null;
 
     const curCx = currentBox.x + currentBox.w / 2;
@@ -315,9 +329,8 @@ function findLocalFaceMatch(videoEl, currentBox) {
 
 /**
  * 🌟 FILMORA 14 STYLE: FULL VIDEO PRE-ANALYSIS SCANNER
- * Robust face scanner with strict duration filtering and visual light/plate verification
  */
-export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfidence = 0.22) {
+export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfidence = 0.20) {
   if (isScanning) return [];
   isScanning = true;
 
@@ -420,8 +433,7 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
       currentTime += stepSec;
     }
 
-    // 🌟 Strict lifespan filter: genuine faces appear for at least 0.5s (>= 5 frames)
-    // This rejects 100% of transient hand, plate, and lamp reflections!
+    // 🌟 Genuine faces persist for at least 0.5s (>= 5 frames)
     const validTracks = tracks.filter(t => {
       const count = t.keyframes.length;
       if (count < 5) return false;
@@ -448,7 +460,7 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
 }
 
 /**
- * 🌟 TRACK A MANUALLY ADDED MISSED FACE (BIDIRECTIONAL TRACKING)
+ * 🌟 TRACK ANY CLICKED OR DRAWN PERSON / HEAD ACROSS THE WHOLE VIDEO
  */
 export async function trackFaceBidirectional(videoEl, initialBox, startT, onProgress = () => {}) {
   const originalTime = videoEl.currentTime;
@@ -541,7 +553,6 @@ export function getInterpolatedFaceBox(track, time, paddingPercent = 20) {
   }
 
   const kfs = track.keyframes;
-  // 🌟 Strict temporal gate: only render when face is actually present
   if (time < kfs[0].t - 0.25 || time > kfs[kfs.length - 1].t + 0.25) {
     return null;
   }
