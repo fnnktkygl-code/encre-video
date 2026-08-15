@@ -230,6 +230,15 @@ import { initPWA } from './pwa.js';
     updateFaceUI();
   });
 
+  const confRange = document.getElementById('conf-range');
+  const confVal = document.getElementById('conf-val');
+  if (confRange) {
+    confRange.addEventListener('input', (e) => {
+      state.minConfidence = parseInt(e.target.value, 10) / 100;
+      if (confVal) confVal.textContent = e.target.value + '%';
+    });
+  }
+
   if (paddingRange) {
     paddingRange.addEventListener('input', (e) => {
       state.facePadding = parseInt(e.target.value, 10);
@@ -724,5 +733,6 @@ import { initPWA } from './pwa.js';
   renderManualTrackList();
   updateChromeVisibility();
   updateFaceUI();
+  loadFaceModels();
 
 })();

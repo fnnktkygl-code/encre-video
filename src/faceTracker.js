@@ -7,7 +7,7 @@ let poseLandmarker = null;
 let visionResolver = null;
 let isDetecting = false;
 let lastDetectionTime = 0;
-const DETECTION_INTERVAL_MS = 60; // Run detection at ~16 FPS for silky smooth tracking
+const DETECTION_INTERVAL_MS = 50; // Run detection at ~20 FPS
 
 async function getVisionResolver() {
   if (visionResolver) return visionResolver;
@@ -20,7 +20,7 @@ async function getVisionResolver() {
   return visionResolver;
 }
 
-export async function initFaceDetectionModel(minConfidence = 0.2) {
+export async function initFaceDetectionModel(minConfidence = 0.15) {
   if (faceDetector) return faceDetector;
   const vision = await getVisionResolver();
 
@@ -30,7 +30,7 @@ export async function initFaceDetectionModel(minConfidence = 0.2) {
         modelAssetPath: '/model/mediapipe/blaze_face_full_range.tflite',
         delegate: 'GPU'
       },
-      runningMode: 'VIDEO',
+      runningMode: 'IMAGE',
       minDetectionConfidence: minConfidence,
       minSuppressionThreshold: 0.3
     });
@@ -41,7 +41,7 @@ export async function initFaceDetectionModel(minConfidence = 0.2) {
         modelAssetPath: '/model/mediapipe/blaze_face_full_range.tflite',
         delegate: 'CPU'
       },
-      runningMode: 'VIDEO',
+      runningMode: 'IMAGE',
       minDetectionConfidence: minConfidence,
       minSuppressionThreshold: 0.3
     });
@@ -59,11 +59,11 @@ export async function initPoseLandmarker() {
         modelAssetPath: '/model/mediapipe/pose_landmarker.task',
         delegate: 'GPU'
       },
-      runningMode: 'VIDEO',
+      runningMode: 'IMAGE',
       numPoses: 8,
-      minPoseDetectionConfidence: 0.25,
-      minPosePresenceConfidence: 0.25,
-      minTrackingConfidence: 0.25
+      minPoseDetectionConfidence: 0.2,
+      minPosePresenceConfidence: 0.2,
+      minTrackingConfidence: 0.2
     });
   } catch (err) {
     console.warn('[Encre Vidéo] Pose Landmarker GPU init error, using CPU:', err);
@@ -73,11 +73,11 @@ export async function initPoseLandmarker() {
           modelAssetPath: '/model/mediapipe/pose_landmarker.task',
           delegate: 'CPU'
         },
-        runningMode: 'VIDEO',
+        runningMode: 'IMAGE',
         numPoses: 8,
-        minPoseDetectionConfidence: 0.25,
-        minPosePresenceConfidence: 0.25,
-        minTrackingConfidence: 0.25
+        minPoseDetectionConfidence: 0.2,
+        minPosePresenceConfidence: 0.2,
+        minTrackingConfidence: 0.2
       });
     } catch (e2) {
       console.warn('[Encre Vidéo] Pose Landmarker unavailable, using pure Face detection:', e2);
@@ -89,7 +89,7 @@ export async function initPoseLandmarker() {
 /**
  * Detects all faces and head keypoints in the current video frame
  */
-export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
+export function detectFrameBboxes(videoEl, minConfidence = 0.15) {
   const detections = [];
   const width = videoEl.videoWidth;
   const height = videoEl.videoHeight;
@@ -98,7 +98,7 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
   // 1. Face Detector Pass (Full-Range BlazeFace)
   if (faceDetector) {
     try {
-      const faceResult = faceDetector.detectForVideo(videoEl, timeMs);
+      const faceResult = faceDetector.detect(videoEl);
       if (faceResult && faceResult.detections) {
         faceResult.detections.forEach(d => {
           const bbox = d.boundingBox;
@@ -112,13 +112,15 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
           });
         });
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[Encre Vidéo] Face detection frame error:', e);
+    }
   }
 
   // 2. Pose Landmarker Pass (Heads from Shoulder/Ear geometry)
   if (poseLandmarker) {
     try {
-      const poseResult = poseLandmarker.detectForVideo(videoEl, timeMs);
+      const poseResult = poseLandmarker.detect(videoEl);
       if (poseResult && poseResult.landmarks) {
         poseResult.landmarks.forEach(landmarks => {
           if (!landmarks || landmarks.length < 13) return;
@@ -136,11 +138,11 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
             (leftShoulder.y - rightShoulder.y) * height
           );
 
-          const headW = Math.max(30, shoulderDist * 0.55);
+          const headW = Math.max(35, shoulderDist * 0.55);
           const headH = headW * 1.25;
 
-          const headCenterX = (nose && nose.visibility > 0.3 ? nose.x : shoulderMidX) * width;
-          const headCenterY = (nose && nose.visibility > 0.3 ? nose.y : (shoulderMidY - (headH / height) * 0.7)) * height;
+          const headCenterX = (nose && nose.visibility > 0.25 ? nose.x : shoulderMidX) * width;
+          const headCenterY = (nose && nose.visibility > 0.25 ? nose.y : (shoulderMidY - (headH / height) * 0.7)) * height;
 
           const candidate = {
             x: headCenterX - headW / 2,
@@ -162,7 +164,9 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
           }
         });
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('[Encre Vidéo] Pose detection frame error:', e);
+    }
   }
 
   return detections;
@@ -171,7 +175,7 @@ export async function detectFrameBboxes(videoEl, timeMs, minConfidence = 0.2) {
 /**
  * Real-time continuous Multi-Person Tracker
  */
-export async function updateRealTimeTracks(videoEl, videoTime, existingTracks, uuidFn, minConfidence = 0.2) {
+export async function updateRealTimeTracks(videoEl, videoTime, existingTracks, uuidFn, minConfidence = 0.15) {
   if (isDetecting || !videoEl || videoEl.readyState < 2) {
     return existingTracks;
   }
@@ -184,9 +188,7 @@ export async function updateRealTimeTracks(videoEl, videoTime, existingTracks, u
   isDetecting = true;
 
   try {
-    const timestampMs = Math.round(videoTime * 1000) || Math.round(now);
-    const preds = await detectFrameBboxes(videoEl, timestampMs, minConfidence);
-
+    const preds = detectFrameBboxes(videoEl, minConfidence);
     return matchAndSmoothTracks(preds, videoTime, existingTracks, uuidFn);
   } catch (err) {
     console.warn('[Encre Vidéo] Real-time tracking error:', err);
@@ -271,9 +273,9 @@ export function smoothTracks(tracks) {
   });
 }
 
-export function getTrackBox(track, paddingPercent = 20) {
+export function getTrackBox(track, paddingPercent = 25) {
   if (!track || track.enabled === false) return null;
-  const p = (paddingPercent !== undefined ? paddingPercent : 20) / 100;
+  const p = (paddingPercent !== undefined ? paddingPercent : 25) / 100;
   const w = Math.max(10, track.dispW * (1 + p));
   const h = Math.max(10, track.dispH * (1 + p * 1.15));
   const x = track.dispX - w / 2;
