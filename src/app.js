@@ -9,7 +9,6 @@ import {
 import { setupGestures } from './gestures.js';
 import {
   initFaceDetectionModel,
-  initPoseLandmarker,
   updateRealTimeTracks,
   smoothTracks,
   getTrackBox
@@ -140,7 +139,7 @@ import { initPWA } from './pwa.js';
   // Stamp and Face Status UI
   function updateStamp() {
     if (state.faceDetectionEnabled) {
-      stampEl.innerHTML = '<span class="dot"></span>MediaPipe Dual IA (Visages + Corps) — Actif';
+      stampEl.innerHTML = '<span class="dot"></span>MediaPipe Full-Range IA — Détection active';
     } else {
       stampEl.innerHTML = '<span class="dot"></span>100% local — aucun réseau';
     }
@@ -158,50 +157,66 @@ import { initPWA } from './pwa.js';
       faceToggleBtn.disabled = false;
       faceToggleBtn.textContent = 'Activer le masquage automatique';
     }
-    const count = faceTracks.filter(t => t.enabled !== false).length;
+    const count = faceTracks.filter(t => !t.deleted && t.enabled !== false).length;
     faceStatusLabel.textContent = state.faceDetectionEnabled
-      ? `${count} personne(s) masquée(s)`
+      ? `${count} visage(s) masqué(s)`
       : '';
     updateStamp();
-    renderPersonChips();
+    renderFaceChips();
   }
 
-  function renderPersonChips() {
-    if (!personChipList) return;
-    if (!faceTracks || faceTracks.length === 0) {
-      if (detectedPersonsBox) detectedPersonsBox.style.display = 'none';
+  function renderFaceChips() {
+    const detectedFacesBox = document.getElementById('detected-faces-box');
+    const faceChipList = document.getElementById('face-chip-list');
+    if (!faceChipList || !detectedFacesBox) return;
+
+    const activeTracks = faceTracks.filter(t => !t.deleted);
+    if (activeTracks.length === 0) {
+      detectedFacesBox.style.display = 'none';
       return;
     }
-    if (detectedPersonsBox) detectedPersonsBox.style.display = '';
-    if (personCountBadge) personCountBadge.textContent = faceTracks.length;
+    detectedFacesBox.style.display = '';
 
-    // Only re-render if count or list changed
-    if (personChipList.children.length !== faceTracks.length) {
-      personChipList.innerHTML = '';
-      faceTracks.forEach(track => {
-        const chip = document.createElement('button');
-        const isEnabled = track.enabled !== false;
-        chip.style.cssText = `
-          display: inline-flex;
-          align-items: center;
-          gap: 4px;
-          padding: 4px 8px;
-          font-size: 11px;
-          font-weight: 600;
-          border-radius: 6px;
-          cursor: pointer;
-          border: 1px solid ${isEnabled ? 'var(--accent)' : 'var(--border)'};
-          background: ${isEnabled ? 'rgba(0, 245, 212, 0.15)' : 'var(--surface)'};
-          color: ${isEnabled ? 'var(--accent)' : 'var(--text-muted)'};
-        `;
-        chip.innerHTML = `${isEnabled ? '👁️' : '🚫'} ${track.name || 'Personne ' + track.id}`;
-        chip.addEventListener('click', () => {
-          track.enabled = !isEnabled;
-          updateFaceUI();
-        });
-        personChipList.appendChild(chip);
+    faceChipList.innerHTML = '';
+    activeTracks.forEach(track => {
+      const chip = document.createElement('div');
+      const isEnabled = track.enabled !== false;
+      chip.style.cssText = `
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 7px;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 6px;
+        border: 1px solid ${isEnabled ? 'var(--accent)' : 'var(--border)'};
+        background: ${isEnabled ? 'rgba(0, 245, 212, 0.15)' : 'var(--surface)'};
+        color: ${isEnabled ? 'var(--accent)' : 'var(--text-muted)'};
+      `;
+
+      const toggleBtn = document.createElement('span');
+      toggleBtn.style.cursor = 'pointer';
+      toggleBtn.textContent = `${isEnabled ? '👁️' : '🚫'} ${track.name}`;
+      toggleBtn.title = isEnabled ? 'Cliquer pour désactiver ce masque' : 'Cliquer pour réactiver ce masque';
+      toggleBtn.addEventListener('click', () => {
+        track.enabled = !isEnabled;
+        updateFaceUI();
       });
-    }
+
+      const delBtn = document.createElement('span');
+      delBtn.style.cssText = 'cursor: pointer; opacity: 0.6; padding-left: 2px; font-weight: bold; font-size: 13px;';
+      delBtn.textContent = '×';
+      delBtn.title = 'Supprimer définitivement ce masque';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        track.deleted = true;
+        updateFaceUI();
+      });
+
+      chip.appendChild(toggleBtn);
+      chip.appendChild(delBtn);
+      faceChipList.appendChild(chip);
+    });
   }
 
   async function loadFaceModels() {
@@ -209,10 +224,7 @@ import { initPWA } from './pwa.js';
     state.faceModelLoading = true;
     updateFaceUI();
     try {
-      await Promise.all([
-        initFaceDetectionModel(0.2),
-        initPoseLandmarker()
-      ]);
+      await initFaceDetectionModel(state.minConfidence || 0.35);
       state.faceModelLoaded = true;
     } catch (err) {
       console.warn('[Encre Vidéo] Model load error:', err);
@@ -230,12 +242,24 @@ import { initPWA } from './pwa.js';
     updateFaceUI();
   });
 
+  const resetDetectionBtn = document.getElementById('reset-detection-btn');
+  if (resetDetectionBtn) {
+    resetDetectionBtn.addEventListener('click', () => {
+      faceTracks = [];
+      updateFaceUI();
+      triggerHaptic();
+    });
+  }
+
   const confRange = document.getElementById('conf-range');
   const confVal = document.getElementById('conf-val');
   if (confRange) {
-    confRange.addEventListener('input', (e) => {
+    confRange.addEventListener('input', async (e) => {
       state.minConfidence = parseInt(e.target.value, 10) / 100;
       if (confVal) confVal.textContent = e.target.value + '%';
+      if (state.faceModelLoaded) {
+        await initFaceDetectionModel(state.minConfidence);
+      }
     });
   }
 
@@ -513,7 +537,7 @@ import { initPWA } from './pwa.js';
     if (state.hasVideo && videoEl.readyState >= 2) {
       // Real-time Detection Pass
       if (state.faceDetectionEnabled && state.faceModelLoaded) {
-        updateRealTimeTracks(videoEl, videoEl.currentTime, faceTracks, uuid, 0.2)
+        updateRealTimeTracks(videoEl, videoEl.currentTime, faceTracks, uuid, state.minConfidence || 0.35)
           .then((newTracks) => {
             faceTracks = newTracks;
             smoothTracks(faceTracks);

@@ -70,22 +70,30 @@
     <aside id="side-panel" class="hidden">
       <div class="panel-section">
         <h2>Détection IA des Visages</h2>
-        <p class="hint">Google MediaPipe Vision (Full-Range + Pose). Détection continue en direct et locale à 100%.</p>
+        <p class="hint">Google MediaPipe Full-Range (Haute précision faciale). Détection continue 100% locale.</p>
         
         <button class="panel-btn on" id="face-toggle-btn">Masquage IA actif — désactiver</button>
+        <button class="btn secondary" id="reset-detection-btn" style="width: 100%; margin-top: 6px; font-size: 12px; padding: 6px 10px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+          🔄 Relancer / Réinitialiser l'IA
+        </button>
 
         <div id="ai-controls" style="margin-top: 12px;">
           <div class="field">
-            <label for="conf-range">Sensibilité IA</label>
-            <input type="range" id="conf-range" min="10" max="60" value="15">
-            <span class="val" id="conf-val">15%</span>
+            <label for="conf-range">Seuil de Détection</label>
+            <input type="range" id="conf-range" min="20" max="65" value="35">
+            <span class="val" id="conf-val">35%</span>
           </div>
 
           <div class="field">
             <label for="padding-range">Marge du Masque</label>
-            <input type="range" id="padding-range" min="0" max="60" value="25">
-            <span class="val" id="padding-val">25%</span>
+            <input type="range" id="padding-range" min="0" max="60" value="20">
+            <span class="val" id="padding-val">20%</span>
           </div>
+        </div>
+
+        <div id="detected-faces-box" style="margin-top: 10px; display: none;">
+          <div style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--text-muted);">Visages actifs (cliquez pour exclure ou supprimer) :</div>
+          <div id="face-chip-list" style="display: flex; flex-wrap: wrap; gap: 4px; max-height: 100px; overflow-y: auto;"></div>
         </div>
       </div>
 
