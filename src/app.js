@@ -15,7 +15,8 @@ import {
 } from './faceTracker.js';
 import {
   upsertKeyframe,
-  interpolateTrack
+  interpolateTrack,
+  autoTrackForward
 } from './manualTracker.js';
 import {
   formatTime,
@@ -33,7 +34,9 @@ import { initPWA } from './pwa.js';
     color: '#0a0a0a',
     blurRadius: 20,
     pixelSize: 16,
-    facePadding: 30,
+    facePadding: 20,
+    minConfidence: 0.25,
+    modelType: 'full',     // 'full' (crowds/distance) | 'short' (selfie/closeup)
     faceDetectionEnabled: false,
     faceModelLoaded: false,
     faceModelLoading: false,
@@ -76,9 +79,19 @@ import { initPWA } from './pwa.js';
   const playBtn = document.getElementById('play-btn');
   const playIcon = document.getElementById('play-icon');
   const faceToggleBtn = document.getElementById('face-toggle-btn');
-  const paddingField = document.getElementById('padding-field');
+  const aiControls = document.getElementById('ai-controls');
+  const aiModelSelect = document.getElementById('ai-model-select');
+  const confRange = document.getElementById('conf-range');
+  const confVal = document.getElementById('conf-val');
+  const paddingRange = document.getElementById('padding-range');
+  const paddingVal = document.getElementById('padding-val');
   const markerModeBtn = document.getElementById('marker-mode-btn');
+  const newTrackBtn = document.getElementById('new-track-btn');
   const manualTrackListEl = document.getElementById('manual-track-list');
+  const trackActionBox = document.getElementById('track-action-box');
+  const selectedTrackName = document.getElementById('selected-track-name');
+  const autoTrackBtn = document.getElementById('auto-track-btn');
+  const autoTrackAllBtn = document.getElementById('auto-track-all-btn');
   const stampEl = document.getElementById('stamp');
   const faceStatusLabel = document.getElementById('face-status-label');
   const exportProgress = document.getElementById('export-progress');
@@ -127,7 +140,7 @@ import { initPWA } from './pwa.js';
   // Stamp and Face Status UI
   function updateStamp() {
     if (state.faceModelLoaded) {
-      stampEl.innerHTML = '<span class="dot"></span>Vidéo traitée localement — détection active';
+      stampEl.innerHTML = '<span class="dot"></span>MediaPipe IA Vision — Détection active';
     } else {
       stampEl.innerHTML = '<span class="dot"></span>100% local — aucun réseau';
     }
@@ -135,19 +148,20 @@ import { initPWA } from './pwa.js';
 
   function updateFaceUI() {
     if (state.faceModelLoading) {
-      faceToggleBtn.textContent = 'Chargement du modèle…';
+      faceToggleBtn.textContent = 'Chargement de l\'IA MediaPipe…';
       faceToggleBtn.disabled = true;
     } else if (state.faceModelLoaded) {
       faceToggleBtn.disabled = false;
-      faceToggleBtn.textContent = state.faceDetectionEnabled ? 'Détection active — désactiver' : 'Activer la détection';
+      faceToggleBtn.textContent = state.faceDetectionEnabled ? 'Détection active — désactiver' : 'Activer la détection automatique';
       faceToggleBtn.classList.toggle('on', state.faceDetectionEnabled);
-      paddingField.style.display = '';
+      if (aiControls) aiControls.style.display = state.faceDetectionEnabled ? '' : 'none';
     } else {
       faceToggleBtn.disabled = false;
-      faceToggleBtn.textContent = 'Activer la détection de visages';
+      faceToggleBtn.textContent = 'Activer la détection automatique';
+      if (aiControls) aiControls.style.display = 'none';
     }
     faceStatusLabel.textContent = state.faceDetectionEnabled
-      ? `${faceTracks.length} visage(s) suivi(s)`
+      ? `${faceTracks.length} visage(s) détecté(s)`
       : '';
     updateStamp();
   }
@@ -163,11 +177,12 @@ import { initPWA } from './pwa.js';
     state.faceModelLoading = true;
     updateFaceUI();
     try {
-      await initFaceDetectionModel();
+      await initFaceDetectionModel(state.modelType, state.minConfidence);
       state.faceModelLoaded = true;
       state.faceDetectionEnabled = true;
     } catch (err) {
-      window.alert("Impossible de charger le modèle de détection de visages. Vérifiez votre connexion internet pour le chargement initial.");
+      console.error(err);
+      window.alert("Impossible de charger le modèle MediaPipe Vision. Vérifiez votre connexion internet pour le chargement initial.");
     } finally {
       state.faceModelLoading = false;
       updateFaceUI();
@@ -176,10 +191,33 @@ import { initPWA } from './pwa.js';
 
   faceToggleBtn.addEventListener('click', enableFaceDetection);
 
-  document.getElementById('padding-range').addEventListener('input', (e) => {
-    state.facePadding = parseInt(e.target.value, 10);
-    document.getElementById('padding-val').textContent = state.facePadding;
-  });
+  if (aiModelSelect) {
+    aiModelSelect.addEventListener('change', async (e) => {
+      state.modelType = e.target.value;
+      if (state.faceModelLoaded) {
+        state.faceModelLoading = true;
+        updateFaceUI();
+        await initFaceDetectionModel(state.modelType, state.minConfidence);
+        state.faceModelLoading = false;
+        updateFaceUI();
+      }
+    });
+  }
+
+  if (confRange) {
+    confRange.addEventListener('input', (e) => {
+      const val = parseInt(e.target.value, 10);
+      state.minConfidence = val / 100;
+      if (confVal) confVal.textContent = val + '%';
+    });
+  }
+
+  if (paddingRange) {
+    paddingRange.addEventListener('input', (e) => {
+      state.facePadding = parseInt(e.target.value, 10);
+      if (paddingVal) paddingVal.textContent = state.facePadding + '%';
+    });
+  }
 
   // Manual Tracks UI
   function getManualTrack(id) {
@@ -188,21 +226,31 @@ import { initPWA } from './pwa.js';
 
   function renderManualTrackList() {
     manualTrackListEl.innerHTML = '';
+    const currentTrack = selectedManualTrackId ? getManualTrack(selectedManualTrackId) : null;
+
+    if (trackActionBox) {
+      trackActionBox.style.display = currentTrack ? '' : 'none';
+      if (currentTrack && selectedTrackName) {
+        selectedTrackName.textContent = `Repère sélectionné : ${currentTrack.name}`;
+      }
+    }
+
     if (manualTracks.length === 0) {
       const p = document.createElement('p');
       p.className = 'hint';
-      p.textContent = 'Aucun repère manuel pour l\'instant.';
+      p.textContent = 'Aucun repère manuel. Cliquez sur "+ Nouveau" ou dessinez directement sur la vidéo.';
       manualTrackListEl.appendChild(p);
       return;
     }
-    manualTracks.forEach((track) => {
+
+    manualTracks.forEach((track, idx) => {
       const item = document.createElement('div');
       item.className = 'track-item' + (track.id === selectedManualTrackId ? ' selected' : '');
 
       const label = document.createElement('button');
       label.className = 'track-label';
       const n = track.keyframes.length;
-      label.textContent = `${track.name} — ${n} repère${n > 1 ? 's' : ''}`;
+      label.textContent = `${track.name} (${n} clé${n > 1 ? 's' : ''})`;
       label.addEventListener('click', () => {
         selectedManualTrackId = (selectedManualTrackId === track.id) ? null : track.id;
         renderManualTrackList();
@@ -222,6 +270,62 @@ import { initPWA } from './pwa.js';
       item.appendChild(label);
       item.appendChild(del);
       manualTrackListEl.appendChild(item);
+    });
+  }
+
+  if (newTrackBtn) {
+    newTrackBtn.addEventListener('click', () => {
+      state.editMode = 'marker';
+      markerModeBtn.classList.add('on');
+      markerModeBtn.textContent = 'Mode « Repère » (actif)';
+      overlay.classList.add('marker-mode');
+      if (!videoEl.paused) videoEl.pause();
+
+      const newTrack = {
+        id: uuid(),
+        name: `Visage ${manualTracks.length + 1}`,
+        keyframes: []
+      };
+      manualTracks.push(newTrack);
+      selectedManualTrackId = newTrack.id;
+      renderManualTrackList();
+    });
+  }
+
+  if (autoTrackBtn) {
+    autoTrackBtn.addEventListener('click', async () => {
+      const track = selectedManualTrackId ? getManualTrack(selectedManualTrackId) : null;
+      if (!track || track.keyframes.length === 0) {
+        window.alert("Veuillez d'abord dessiner un repère sur la personne pour initialiser son suivi.");
+        return;
+      }
+      autoTrackBtn.disabled = true;
+      autoTrackBtn.textContent = 'Suivi en cours…';
+      await autoTrackForward(videoEl, track, videoEl.currentTime, 5, (pct) => {
+        autoTrackBtn.textContent = `Suivi en cours (${pct}%)…`;
+      });
+      autoTrackBtn.disabled = false;
+      autoTrackBtn.textContent = '⚡ Suivre le mouvement (5s)';
+      renderManualTrackList();
+    });
+  }
+
+  if (autoTrackAllBtn) {
+    autoTrackAllBtn.addEventListener('click', async () => {
+      const track = selectedManualTrackId ? getManualTrack(selectedManualTrackId) : null;
+      if (!track || track.keyframes.length === 0) {
+        window.alert("Veuillez d'abord dessiner un repère sur la personne pour initialiser son suivi.");
+        return;
+      }
+      autoTrackAllBtn.disabled = true;
+      autoTrackAllBtn.textContent = 'Suivi complet…';
+      const remaining = Math.max(1, (videoEl.duration || 10) - videoEl.currentTime);
+      await autoTrackForward(videoEl, track, videoEl.currentTime, remaining, (pct) => {
+        autoTrackAllBtn.textContent = `Suivi complet (${pct}%)…`;
+      });
+      autoTrackAllBtn.disabled = false;
+      autoTrackAllBtn.textContent = '⚡ Suivre toute la vidéo';
+      renderManualTrackList();
     });
   }
 
@@ -383,11 +487,14 @@ import { initPWA } from './pwa.js';
     if (state.hasVideo && videoEl.readyState >= 2) {
       if (state.faceDetectionEnabled && state.faceModelLoaded && !faceDetecting) {
         faceDetecting = true;
-        maybeRunDetection(videoEl, videoEl.currentTime, faceTracks, uuid)
+        maybeRunDetection(videoEl, videoEl.currentTime, faceTracks, uuid, state.minConfidence)
           .then((newTracks) => {
             faceTracks = newTracks;
             smoothTracks(faceTracks);
             faceDetecting = false;
+            if (faceStatusLabel) {
+              faceStatusLabel.textContent = `${faceTracks.length} visage(s) détecté(s)`;
+            }
           })
           .catch(() => {
             faceDetecting = false;
@@ -406,6 +513,31 @@ import { initPWA } from './pwa.js';
         paddedBox,
         interpolateTrack
       );
+
+      // Render interactive manual tracks on overlay when in marker mode
+      if (state.editMode === 'marker' && !markerStart) {
+        clearOverlay();
+        manualTracks.forEach((track) => {
+          const box = interpolateTrack(track, videoEl.currentTime);
+          if (box) {
+            const isSelected = track.id === selectedManualTrackId;
+            overlayCtx.save();
+            overlayCtx.strokeStyle = isSelected ? 'rgba(0, 245, 212, 0.95)' : 'rgba(255, 255, 255, 0.55)';
+            overlayCtx.lineWidth = isSelected ? 2.5 : 1.5;
+            overlayCtx.setLineDash(isSelected ? [6, 4] : [4, 4]);
+            overlayCtx.strokeRect(box.x, box.y, box.w, box.h);
+
+            // Track name tag
+            const tagW = Math.min(box.w, 90);
+            overlayCtx.fillStyle = isSelected ? 'rgba(0, 245, 212, 0.9)' : 'rgba(0, 0, 0, 0.65)';
+            overlayCtx.fillRect(box.x, Math.max(0, box.y - 18), tagW, 18);
+            overlayCtx.fillStyle = isSelected ? '#000000' : '#FFFFFF';
+            overlayCtx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+            overlayCtx.fillText(track.name, box.x + 4, Math.max(12, box.y - 5));
+            overlayCtx.restore();
+          }
+        });
+      }
     }
     rafId = requestAnimationFrame(loop);
   }

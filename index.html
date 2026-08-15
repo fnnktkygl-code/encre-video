@@ -69,21 +69,47 @@
 
     <aside id="side-panel" class="hidden">
       <div class="panel-section">
-        <h2>Détection automatique</h2>
-        <p class="hint">Repère les visages et fait suivre le masque à leurs mouvements. Modèle IA embarqué en local (350 Ko) — votre vidéo ne quitte jamais votre appareil et la détection fonctionne 100% hors-ligne.</p>
-        <button class="panel-btn" id="face-toggle-btn">Activer la détection de visages</button>
-        <div class="field" id="padding-field" style="display:none;">
-          <label for="padding-range">Marge</label>
-          <input type="range" id="padding-range" min="0" max="80" value="30">
-          <span class="val" id="padding-val">30</span>
+        <h2>Détection IA des Visages</h2>
+        <p class="hint">Google MediaPipe Vision (Haute précision &amp; multi-visages). 100% local dans votre navigateur.</p>
+        <button class="panel-btn" id="face-toggle-btn">Activer la détection automatique</button>
+        
+        <div id="ai-controls" style="display:none; margin-top: 12px;">
+          <div class="field">
+            <label for="ai-model-select">Portée IA</label>
+            <select id="ai-model-select" style="width: 100%; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; font-size: 12px;">
+              <option value="full">🌍 Multi-Visages &amp; Foules (Full-Range)</option>
+              <option value="short">👤 Gros Plan / Selfie (Short-Range)</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="conf-range">Sensibilité</label>
+            <input type="range" id="conf-range" min="10" max="70" value="25">
+            <span class="val" id="conf-val">25%</span>
+          </div>
+
+          <div class="field">
+            <label for="padding-range">Marge du Masque</label>
+            <input type="range" id="padding-range" min="0" max="60" value="20">
+            <span class="val" id="padding-val">20%</span>
+          </div>
         </div>
       </div>
 
       <div class="panel-section">
-        <h2>Repères manuels</h2>
-        <p class="hint">Pour le texte, les plaques ou logos. Dessinez un rectangle sur la vidéo à l'instant souhaité, puis avancez dans la vidéo pour ajuster son déplacement au fil du temps.</p>
-        <button class="panel-btn" id="marker-mode-btn">Mode « Repère manuel »</button>
+        <h2>Repères Manuels &amp; Suivi</h2>
+        <p class="hint">Floutez plusieurs visages ou objets spécifiques avec suivi automatique ou par images-clés.</p>
+        <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+          <button class="panel-btn" id="marker-mode-btn" style="flex: 1;">Mode « Repère »</button>
+          <button class="btn secondary" id="new-track-btn" title="Ajouter un nouveau repère distinct" style="padding: 0 12px; font-size: 12px;">+ Nouveau</button>
+        </div>
         <div id="manual-track-list"></div>
+
+        <div id="track-action-box" style="display:none; margin-top: 10px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px;">
+          <div style="font-size: 11px; font-weight: bold; margin-bottom: 6px; color: var(--accent);" id="selected-track-name">Repère actif</div>
+          <button class="panel-btn primary" id="auto-track-btn" style="font-size: 12px; padding: 8px;">⚡ Suivre le mouvement (5s)</button>
+          <button class="btn ghost" id="auto-track-all-btn" style="width: 100%; margin-top: 4px; font-size: 11px; padding: 6px;">⚡ Suivre toute la vidéo</button>
+        </div>
       </div>
     </aside>
 
