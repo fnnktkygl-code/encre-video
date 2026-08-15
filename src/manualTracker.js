@@ -21,9 +21,20 @@ export function deleteKeyframe(track, t) {
   track.keyframes = track.keyframes.filter(kf => Math.abs(kf.t - t) >= eps);
 }
 
+/**
+ * 🌟 STRICT TEMPORAL INTERPOLATION
+ * If the target has left the screen (t > last keyframe or t < first keyframe),
+ * the blur IMMEDIATELY DISAPPEARS!
+ */
 export function interpolateTrack(track, t) {
   const kfs = track.keyframes;
   if (!kfs || kfs.length === 0) return null;
+
+  // If outside track lifespan, DO NOT show the blur
+  if (t < kfs[0].t - 0.25 || t > kfs[kfs.length - 1].t + 0.25) {
+    return null;
+  }
+
   if (t <= kfs[0].t) {
     return { x: kfs[0].x, y: kfs[0].y, w: kfs[0].w, h: kfs[0].h };
   }
@@ -39,7 +50,6 @@ export function interpolateTrack(track, t) {
     if (t >= a.t && t <= b.t) {
       const dt = Math.max(0.0001, b.t - a.t);
       const f = (t - a.t) / dt;
-      // Smooth Hermite / Ease interpolation
       const ease = f * f * (3 - 2 * f);
       return {
         x: a.x + (b.x - a.x) * ease,
@@ -54,12 +64,13 @@ export function interpolateTrack(track, t) {
 }
 
 /**
- * High-Precision Multi-Scale NCC Template Matcher & Optical Flow
+ * 🌟 High-Precision Optical Tracker with Auto-Disappearance Detection
+ * Stops automatically when target leaves the frame or is occluded.
  */
 export async function autoTrackForward(videoEl, track, startT, durationSec = 5, onProgress = () => {}) {
   if (!track || track.keyframes.length === 0) return;
 
-  const initialBox = interpolateTrack(track, startT);
+  const initialBox = interpolateTrack(track, startT) || track.keyframes[track.keyframes.length - 1];
   if (!initialBox) return;
 
   const originalTime = videoEl.currentTime;
@@ -71,7 +82,7 @@ export async function autoTrackForward(videoEl, track, startT, durationSec = 5, 
   offCanvas.height = videoEl.videoHeight;
   const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
 
-  // 1. Capture initial template frame
+  await seekVideoFrame(videoEl, startT);
   offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
   let template = captureTemplate(offCtx, initialBox);
 
@@ -81,40 +92,51 @@ export async function autoTrackForward(videoEl, track, startT, durationSec = 5, 
   const endT = Math.min(videoEl.duration || (startT + durationSec), startT + durationSec);
   const totalSteps = Math.max(1, Math.ceil((endT - startT) / step));
   let stepIdx = 0;
+  let lostStreak = 0;
 
   try {
     while (currentT < endT) {
       currentT = Math.min(endT, currentT + step);
       stepIdx++;
 
-      // Seek video and await frame render
       await seekVideoFrame(videoEl, currentT);
-
-      // Capture frame
       offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
 
-      // 1. Try AI Face Matching in local neighborhood first (if tracking a face)
+      // 1. Try AI Face Matching in local neighborhood
       const aiMatchedBox = findLocalFaceMatch(videoEl, currentBox);
 
       if (aiMatchedBox) {
         currentBox = aiMatchedBox;
-        // Update template occasionally to handle slight lighting changes
+        lostStreak = 0;
         if (stepIdx % 3 === 0) {
           template = captureTemplate(offCtx, currentBox);
         }
       } else if (template) {
-        // 2. Fallback to Normalized Cross-Correlation Template Matching (for any object / head)
-        const margin = Math.max(40, currentBox.w * 0.7);
-        const nccMatchedBox = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
-        if (nccMatchedBox) {
-          currentBox = nccMatchedBox;
+        // 2. Optical Correlation Template Match
+        const margin = Math.max(40, currentBox.w * 0.75);
+        const matchResult = matchTemplateWithQuality(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
+
+        if (matchResult && matchResult.confidence > 0.45) {
+          currentBox = matchResult.box;
+          lostStreak = 0;
           if (stepIdx % 4 === 0) {
             template = captureTemplate(offCtx, currentBox);
+          }
+        } else {
+          // Target lost or left the frame
+          lostStreak++;
+          // Check if at frame border
+          const isAtBorder = currentBox.x <= 10 || (currentBox.x + currentBox.w >= offCanvas.width - 10) ||
+                             currentBox.y <= 10 || (currentBox.y + currentBox.h >= offCanvas.height - 10);
+          
+          if (lostStreak >= 2 || isAtBorder) {
+            // Target left the screen: STOP tracking!
+            break;
           }
         }
       }
 
-      // Save keyframe
+      // Save keyframe while target is visible
       upsertKeyframe(track, currentT, currentBox.x, currentBox.y, currentBox.w, currentBox.h);
       onProgress(Math.min(99, Math.round((stepIdx / totalSteps) * 100)));
     }
@@ -137,19 +159,16 @@ function seekVideoFrame(videoEl, time) {
         resolve();
       }
     };
-    const onSeeked = () => {
-      // Small timeout to allow GPU texture render on Chrome/Safari
-      setTimeout(cleanup, 20);
-    };
+    const onSeeked = () => setTimeout(cleanup, 25);
     videoEl.addEventListener('seeked', onSeeked, { once: true });
     videoEl.currentTime = time;
-    setTimeout(cleanup, 250); // safety fallback
+    setTimeout(cleanup, 250);
   });
 }
 
 function findLocalFaceMatch(videoEl, currentBox) {
   try {
-    const detections = detectFrameBboxes(videoEl, 0.25);
+    const detections = detectFrameBboxes(videoEl, 0.20);
     if (!detections || detections.length === 0) return null;
 
     const curCx = currentBox.x + currentBox.w / 2;
@@ -162,7 +181,7 @@ function findLocalFaceMatch(videoEl, currentBox) {
       const dcx = d.x + d.w / 2;
       const dcy = d.y + d.h / 2;
       const dist = Math.hypot(dcx - curCx, dcy - curCy);
-      const maxAllowedDist = Math.max(currentBox.w, currentBox.h, 60) * 1.6;
+      const maxAllowedDist = Math.max(currentBox.w, currentBox.h, 50) * 1.5;
 
       if (dist < maxAllowedDist && dist < bestDist) {
         bestDist = dist;
@@ -191,7 +210,6 @@ function captureTemplate(ctx, box) {
 
   try {
     const rawData = ctx.getImageData(bx, by, bw, bh);
-    // Downscale template to 24x24 grayscale matrix for fast cross-correlation
     const tw = 24;
     const th = 24;
     const grid = new Float32Array(tw * th);
@@ -215,7 +233,7 @@ function captureTemplate(ctx, box) {
   }
 }
 
-function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
+function matchTemplateWithQuality(ctx, template, currentBox, margin, maxW, maxH) {
   const sx = Math.max(0, Math.round(currentBox.x - margin));
   const sy = Math.max(0, Math.round(currentBox.y - margin));
   const ex = Math.min(maxW, Math.round(currentBox.x + currentBox.w + margin));
@@ -223,7 +241,7 @@ function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
   const sw = ex - sx;
   const sh = ey - sy;
 
-  if (sw <= currentBox.w || sh <= currentBox.h) return currentBox;
+  if (sw <= currentBox.w || sh <= currentBox.h) return null;
 
   try {
     const searchData = ctx.getImageData(sx, sy, sw, sh);
@@ -236,14 +254,13 @@ function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
     const tw = template.tw;
     const th = template.th;
     const tgrid = template.grid;
-
     const bw = currentBox.w;
     const bh = currentBox.h;
 
-    // Coarse Search with 3px step
     const step = 3;
     const maxCandidateX = sw - bw;
     const maxCandidateY = sh - bh;
+    const sampleCount = (tw / 2) * (th / 2);
 
     for (let cy = 0; cy <= maxCandidateY; cy += step) {
       for (let cx = 0; cx <= maxCandidateX; cx += step) {
@@ -270,20 +287,31 @@ function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
       }
     }
 
+    const avgDiff = Math.sqrt(bestScore / sampleCount);
+    // Normalized confidence (0 to 1)
+    const confidence = Math.max(0, 1 - (avgDiff / 50));
+
+    if (confidence < 0.35) {
+      // Texture is completely different -> Target lost
+      return null;
+    }
+
     const matchedX = sx + bestDx;
     const matchedY = sy + bestDy;
 
-    // Smooth position update
-    const smoothX = currentBox.x * 0.3 + matchedX * 0.7;
-    const smoothY = currentBox.y * 0.3 + matchedY * 0.7;
+    const smoothX = currentBox.x * 0.25 + matchedX * 0.75;
+    const smoothY = currentBox.y * 0.25 + matchedY * 0.75;
 
     return {
-      x: Math.max(0, Math.min(maxW - currentBox.w, smoothX)),
-      y: Math.max(0, Math.min(maxH - currentBox.h, smoothY)),
-      w: currentBox.w,
-      h: currentBox.h
+      confidence,
+      box: {
+        x: Math.max(0, Math.min(maxW - currentBox.w, smoothX)),
+        y: Math.max(0, Math.min(maxH - currentBox.h, smoothY)),
+        w: currentBox.w,
+        h: currentBox.h
+      }
     };
   } catch (e) {
-    return currentBox;
+    return null;
   }
 }

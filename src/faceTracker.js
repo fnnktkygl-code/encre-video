@@ -274,6 +274,13 @@ function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
       }
     }
 
+    const avgDiff = Math.sqrt(bestScore / sampleCount);
+    const confidence = Math.max(0, 1 - (avgDiff / 50));
+
+    if (confidence < 0.35) {
+      return null;
+    }
+
     const matchedX = sx + bestDx;
     const matchedY = sy + bestDy;
 
@@ -281,13 +288,16 @@ function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
     const smoothY = currentBox.y * 0.25 + matchedY * 0.75;
 
     return {
-      x: Math.max(0, Math.min(maxW - currentBox.w, smoothX)),
-      y: Math.max(0, Math.min(maxH - currentBox.h, smoothY)),
-      w: currentBox.w,
-      h: currentBox.h
+      confidence,
+      box: {
+        x: Math.max(0, Math.min(maxW - currentBox.w, smoothX)),
+        y: Math.max(0, Math.min(maxH - currentBox.h, smoothY)),
+        w: currentBox.w,
+        h: currentBox.h
+      }
     };
   } catch (e) {
-    return currentBox;
+    return null;
   }
 }
 
@@ -498,15 +508,19 @@ export async function trackFaceBidirectional(videoEl, initialBox, startT, onProg
     if (aiMatched) {
       currentBox = aiMatched;
       if (stepCount % 3 === 0) template = captureTemplate(offCtx, currentBox);
+      keyframes.push({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
     } else if (template) {
-      const margin = Math.max(40, currentBox.w * 0.7);
-      const nccMatched = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
-      if (nccMatched) {
-        currentBox = nccMatched;
+      const margin = Math.max(40, currentBox.w * 0.75);
+      const matchResult = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
+      if (matchResult && matchResult.confidence > 0.40) {
+        currentBox = matchResult.box;
         if (stepCount % 4 === 0) template = captureTemplate(offCtx, currentBox);
+        keyframes.push({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
+      } else {
+        // Person walked out of frame or camera panned away: STOP tracking forward!
+        break;
       }
     }
-    keyframes.push({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
     onProgress(Math.min(99, Math.round((stepCount / totalSteps) * 100)));
   }
 
@@ -525,15 +539,19 @@ export async function trackFaceBidirectional(videoEl, initialBox, startT, onProg
     if (aiMatched) {
       currentBox = aiMatched;
       if (stepCount % 3 === 0) template = captureTemplate(offCtx, currentBox);
+      keyframes.unshift({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
     } else if (template) {
-      const margin = Math.max(40, currentBox.w * 0.7);
-      const nccMatched = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
-      if (nccMatched) {
-        currentBox = nccMatched;
+      const margin = Math.max(40, currentBox.w * 0.75);
+      const matchResult = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
+      if (matchResult && matchResult.confidence > 0.40) {
+        currentBox = matchResult.box;
         if (stepCount % 4 === 0) template = captureTemplate(offCtx, currentBox);
+        keyframes.unshift({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
+      } else {
+        // Person was not in frame earlier: STOP tracking backward!
+        break;
       }
     }
-    keyframes.unshift({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
     onProgress(Math.min(99, Math.round((stepCount / totalSteps) * 100)));
   }
 
