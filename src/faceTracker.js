@@ -4,9 +4,7 @@ import { FaceDetector, FilesetResolver } from '@mediapipe/tasks-vision';
 
 let faceDetector = null;
 let visionResolver = null;
-let isDetecting = false;
-let lastDetectionTime = 0;
-const DETECTION_INTERVAL_MS = 50; // ~20 FPS
+let isScanning = false;
 
 async function getVisionResolver() {
   if (visionResolver) return visionResolver;
@@ -20,6 +18,7 @@ async function getVisionResolver() {
 }
 
 export async function initFaceDetectionModel(minConfidence = 0.35) {
+  if (faceDetector) return faceDetector;
   const vision = await getVisionResolver();
 
   try {
@@ -47,31 +46,15 @@ export async function initFaceDetectionModel(minConfidence = 0.35) {
   return faceDetector;
 }
 
-/**
- * Filter out false positives on lamps, ceilings, patterns, and walls
- */
 export function isValidFaceBox(bbox, videoW, videoH) {
   const { originX: x, originY: y, width: w, height: h } = bbox;
-
-  // 1. Minimum and maximum physical size constraints
   if (w < 16 || h < 16) return false;
   if (w > videoW * 0.65 || h > videoH * 0.65) return false;
-
-  // 2. Human face aspect ratio constraint (human faces are roughly 1 : 1.2)
   const ratio = w / Math.max(1, h);
   if (ratio < 0.5 || ratio > 1.6) return false;
-
-  // 3. Coordinate bounds
-  if (x < -w * 0.3 || y < -h * 0.3 || x + w > videoW + w * 0.3 || y + h > videoH + h * 0.3) {
-    return false;
-  }
-
   return true;
 }
 
-/**
- * Detects actual human faces with geometric plausibility verification
- */
 export function detectFrameBboxes(videoEl, minConfidence = 0.35) {
   const detections = [];
   const width = videoEl.videoWidth;
@@ -84,7 +67,6 @@ export function detectFrameBboxes(videoEl, minConfidence = 0.35) {
       result.detections.forEach(d => {
         const bbox = d.boundingBox;
         const score = (d.categories && d.categories[0]) ? d.categories[0].score : 1.0;
-
         if (score >= minConfidence && isValidFaceBox(bbox, width, height)) {
           detections.push({
             x: Math.max(0, bbox.originX),
@@ -104,118 +86,237 @@ export function detectFrameBboxes(videoEl, minConfidence = 0.35) {
 }
 
 /**
- * Real-time Multi-Face Tracking with Temporal Confirmation (Anti-Ghosting)
+ * 🌟 FILMORA 14 STYLE: FULL VIDEO PRE-ANALYSIS SCANNER
+ * Scans video, tracks each face trajectory, and extracts visual thumbnail avatar crops!
  */
-export async function updateRealTimeTracks(videoEl, videoTime, existingTracks, uuidFn, minConfidence = 0.35) {
-  if (isDetecting || !videoEl || videoEl.readyState < 2) {
-    return existingTracks;
-  }
-
-  const now = performance.now();
-  if (now - lastDetectionTime < DETECTION_INTERVAL_MS) {
-    return existingTracks;
-  }
-  lastDetectionTime = now;
-  isDetecting = true;
+export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfidence = 0.35) {
+  if (isScanning) return [];
+  isScanning = true;
 
   try {
-    const preds = detectFrameBboxes(videoEl, minConfidence);
-    return matchAndFilterTracks(preds, videoTime, existingTracks, uuidFn);
-  } catch (err) {
-    console.warn('[Encre Vidéo] Real-time tracking error:', err);
-    return existingTracks;
-  } finally {
-    isDetecting = false;
-  }
-}
+    await initFaceDetectionModel(minConfidence);
 
-export function matchAndFilterTracks(preds, videoTime, existingTracks, uuidFn) {
-  const used = new Array(existingTracks.length).fill(false);
-  const updatedTracks = [...existingTracks];
+    const originalTime = videoEl.currentTime;
+    const originalPaused = videoEl.paused;
+    videoEl.pause();
 
-  preds.forEach(p => {
-    const cx = p.x + p.w / 2;
-    const cy = p.y + p.h / 2;
-    const w = p.w;
-    const h = p.h;
+    const duration = videoEl.duration || 10;
+    const stepSec = 0.1; // 10 FPS scan
+    const totalSteps = Math.ceil(duration / stepSec);
 
-    let bestIdx = -1;
-    let bestDist = Infinity;
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = videoEl.videoWidth;
+    offCanvas.height = videoEl.videoHeight;
+    const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
 
-    updatedTracks.forEach((t, i) => {
-      if (used[i] || t.deleted) return;
-      const dt = Math.max(0, videoTime - t.lastSeen);
-      const predX = t.targetX + (t.vx || 0) * dt;
-      const predY = t.targetY + (t.vy || 0) * dt;
-      const d = Math.hypot(predX - cx, predY - cy);
+    const tracks = [];
+    let currentTime = 0;
+    let step = 0;
 
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
-      }
+    while (currentTime <= duration) {
+      step++;
+
+      // Seek video to frame
+      await new Promise(resolve => {
+        let done = false;
+        const cleanup = () => {
+          if (!done) {
+            done = true;
+            videoEl.removeEventListener('seeked', onSeeked);
+            resolve();
+          }
+        };
+        const onSeeked = () => setTimeout(cleanup, 25);
+        videoEl.addEventListener('seeked', onSeeked, { once: true });
+        videoEl.currentTime = currentTime;
+        setTimeout(cleanup, 200);
+      });
+
+      // Capture frame & run detection
+      offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
+      const frameDets = detectFrameBboxes(videoEl, minConfidence);
+
+      // Match detections to existing tracks
+      const usedDets = new Set();
+      tracks.forEach(track => {
+        if (track.keyframes.length === 0) return;
+        const lastKf = track.keyframes[track.keyframes.length - 1];
+        if (Math.abs(currentTime - lastKf.t) > 1.4) return; // lost too long
+
+        const lcx = lastKf.x + lastKf.w / 2;
+        const lcy = lastKf.y + lastKf.h / 2;
+
+        let bestIdx = -1;
+        let bestDist = Infinity;
+
+        frameDets.forEach((d, i) => {
+          if (usedDets.has(i)) return;
+          const dcx = d.x + d.w / 2;
+          const dcy = d.y + d.h / 2;
+          const dist = Math.hypot(dcx - lcx, dcy - lcy);
+          const maxDist = Math.max(lastKf.w, lastKf.h, 50) * 1.6;
+
+          if (dist < maxDist && dist < bestDist) {
+            bestDist = dist;
+            bestIdx = i;
+          }
+        });
+
+        if (bestIdx !== -1) {
+          const matched = frameDets[bestIdx];
+          usedDets.add(bestIdx);
+          track.keyframes.push({
+            t: currentTime,
+            x: matched.x,
+            y: matched.y,
+            w: matched.w,
+            h: matched.h,
+            score: matched.score
+          });
+
+          // If this detection is clearer, update avatar crop
+          if (matched.score > track.bestScore) {
+            track.bestScore = matched.score;
+            track.bestTimestamp = currentTime;
+            track.avatarUrl = createAvatarCrop(offCtx, matched);
+          }
+        }
+      });
+
+      // Unmatched detections become new tracks
+      frameDets.forEach((d, i) => {
+        if (usedDets.has(i)) return;
+        const newTrack = {
+          id: tracks.length + 1,
+          name: `Visage ${tracks.length + 1}`,
+          enabled: true,
+          deleted: false,
+          bestScore: d.score,
+          bestTimestamp: currentTime,
+          avatarUrl: createAvatarCrop(offCtx, d),
+          keyframes: [{
+            t: currentTime,
+            x: d.x,
+            y: d.y,
+            w: d.w,
+            h: d.h,
+            score: d.score
+          }]
+        };
+        tracks.push(newTrack);
+      });
+
+      const pct = Math.min(99, Math.round((step / totalSteps) * 100));
+      onProgress(pct, tracks.filter(t => t.keyframes.length >= 2).length);
+      currentTime += stepSec;
+    }
+
+    // Filter out spurious 1-frame glitches (only keep confirmed tracks with >= 2 keyframes)
+    const validTracks = tracks.filter(t => t.keyframes.length >= 2);
+    validTracks.forEach((t, idx) => {
+      t.id = idx + 1;
+      t.name = `Visage ${idx + 1}`;
     });
 
-    const threshold = Math.max(w, h, 40) * 1.6;
-    if (bestIdx !== -1 && bestDist < threshold) {
-      const t = updatedTracks[bestIdx];
-      const dt = Math.max(0.01, videoTime - t.lastSeen);
-      t.vx = (cx - t.targetX) / dt;
-      t.vy = (cy - t.targetY) / dt;
-      t.targetX = cx;
-      t.targetY = cy;
-      t.targetW = w;
-      t.targetH = h;
-      t.lastSeen = videoTime;
-      t.score = p.score;
-      t.hits = (t.hits || 1) + 1; // Increase confirmation count
-      used[bestIdx] = true;
-    } else {
-      const id = updatedTracks.length + 1;
-      updatedTracks.push({
-        id: id,
-        name: `Visage ${id}`,
-        enabled: true,
-        deleted: false,
-        hits: 1, // Start with 1 hit
-        targetX: cx,
-        targetY: cy,
-        targetW: w,
-        targetH: h,
-        dispX: cx,
-        dispY: cy,
-        dispW: w,
-        dispH: h,
-        vx: 0,
-        vy: 0,
-        lastSeen: videoTime,
-        score: p.score
-      });
-    }
-  });
+    // Restore video state
+    videoEl.currentTime = originalTime;
+    if (!originalPaused) videoEl.play();
+    onProgress(100, validTracks.length);
 
-  // Keep tracks alive for up to 1.0s of head turn/brief occlusion
-  return updatedTracks.filter(t => !t.deleted && Math.abs(videoTime - t.lastSeen) < 1.0);
+    return validTracks;
+  } catch (err) {
+    console.error('[Encre Vidéo] Video scanning error:', err);
+    throw err;
+  } finally {
+    isScanning = false;
+  }
 }
 
-export function smoothTracks(tracks) {
-  const ease = 0.6;
-  tracks.forEach(t => {
-    t.dispX += (t.targetX - t.dispX) * ease;
-    t.dispY += (t.targetY - t.dispY) * ease;
-    t.dispW += (t.targetW - t.dispW) * ease;
-    t.dispH += (t.targetH - t.dispH) * ease;
-  });
-}
+function createAvatarCrop(ctx, box) {
+  try {
+    const pad = Math.round(box.w * 0.15);
+    const sx = Math.max(0, Math.round(box.x - pad));
+    const sy = Math.max(0, Math.round(box.y - pad));
+    const sw = Math.min(ctx.canvas.width - sx, Math.round(box.w + pad * 2));
+    const sh = Math.min(ctx.canvas.height - sy, Math.round(box.h + pad * 2));
 
-export function getTrackBox(track, paddingPercent = 20) {
-  // Require at least 2 hits (temporal confirmation) to eliminate 1-frame wall/lamp glitches
-  if (!track || track.enabled === false || track.deleted || (track.hits < 2 && track.score < 0.6)) {
+    if (sw <= 0 || sh <= 0) return null;
+
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = 64;
+    cropCanvas.height = 64;
+    const cctx = cropCanvas.getContext('2d');
+
+    // Circular crop for beautiful Filmora-style avatar
+    cctx.beginPath();
+    cctx.arc(32, 32, 32, 0, Math.PI * 2);
+    cctx.clip();
+    cctx.drawImage(ctx.canvas, sx, sy, sw, sh, 0, 0, 64, 64);
+
+    return cropCanvas.toDataURL('image/jpeg', 0.85);
+  } catch (e) {
     return null;
   }
+}
+
+export function getInterpolatedFaceBox(track, time, paddingPercent = 20) {
+  if (!track || track.enabled === false || track.deleted || !track.keyframes || track.keyframes.length === 0) {
+    return null;
+  }
+
+  const kfs = track.keyframes;
+  if (time < kfs[0].t - 0.2 || time > kfs[kfs.length - 1].t + 0.2) {
+    return null;
+  }
+
+  let box = null;
+  if (time <= kfs[0].t) {
+    box = kfs[0];
+  } else if (time >= kfs[kfs.length - 1].t) {
+    box = kfs[kfs.length - 1];
+  } else {
+    // Binary search
+    let low = 0;
+    let high = kfs.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (kfs[mid].t <= time && (mid === kfs.length - 1 || kfs[mid + 1].t >= time)) {
+        const a = kfs[mid];
+        const b = kfs[mid + 1] || a;
+        const dt = Math.max(0.0001, b.t - a.t);
+        const f = (time - a.t) / dt;
+        const ease = f * f * (3 - 2 * f);
+        box = {
+          x: a.x + (b.x - a.x) * ease,
+          y: a.y + (b.y - a.y) * ease,
+          w: a.w + (b.w - a.w) * ease,
+          h: a.h + (b.h - a.h) * ease
+        };
+        break;
+      } else if (kfs[mid].t < time) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+  }
+
+  if (!box) return null;
+
   const p = (paddingPercent !== undefined ? paddingPercent : 20) / 100;
-  const w = Math.max(10, track.dispW * (1 + p));
-  const h = Math.max(10, track.dispH * (1 + p * 1.15));
-  const x = track.dispX - w / 2;
-  const y = track.dispY - h / 2;
-  return { x, y, w, h };
+  const w = box.w * (1 + p);
+  const h = box.h * (1 + p * 1.15);
+  const x = box.x - (w - box.w) / 2;
+  const y = box.y - (h - box.h) / 2;
+
+  return {
+    x,
+    y,
+    w,
+    h,
+    cx: x + w / 2,
+    cy: y + h / 2,
+    rx: w / 2,
+    ry: h / 2
+  };
 }

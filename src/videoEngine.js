@@ -1,6 +1,6 @@
 "use strict";
 
-import { applyToClippedRect, cloneCanvas } from './canvas.js';
+import { applyToClippedRect, applyToClippedOval, cloneCanvas } from './canvas.js';
 
 export function formatTime(s) {
   if (!isFinite(s) || s < 0) s = 0;
@@ -16,7 +16,7 @@ export function renderVideoFrame(
   state,
   faceTracks,
   manualTracks,
-  getTrackBoxFn,
+  getFaceBoxFn,
   interpolateManualTrackFn
 ) {
   if (!state.hasVideo || videoEl.readyState < 2) return;
@@ -27,22 +27,35 @@ export function renderVideoFrame(
     const rawFrame = cloneCanvas(workCanvas);
     const t = videoEl.currentTime;
 
-    // Apply auto face/head detection masks
+    // Apply auto face detection masks (Soft Feathered Ovals)
     if (state.faceDetectionEnabled && faceTracks && faceTracks.length > 0) {
       faceTracks.forEach((track) => {
-        if (track.enabled === false) return;
-        const box = getTrackBoxFn(track, state.facePadding);
+        if (track.enabled === false || track.deleted) return;
+        const box = getFaceBoxFn(track, t, state.facePadding);
         if (box) {
-          applyToClippedRect(
-            workCtx,
-            rawFrame,
-            box.x,
-            box.y,
-            box.w,
-            box.h,
-            state.mode,
-            { color: state.color, blurRadius: state.blurRadius, pixelSize: state.pixelSize }
-          );
+          if (box.cx !== undefined) {
+            applyToClippedOval(
+              workCtx,
+              rawFrame,
+              box.cx,
+              box.cy,
+              box.rx,
+              box.ry,
+              state.mode,
+              { color: state.color, blurRadius: state.blurRadius, pixelSize: state.pixelSize }
+            );
+          } else {
+            applyToClippedRect(
+              workCtx,
+              rawFrame,
+              box.x,
+              box.y,
+              box.w,
+              box.h,
+              state.mode,
+              { color: state.color, blurRadius: state.blurRadius, pixelSize: state.pixelSize }
+            );
+          }
         }
       });
     }

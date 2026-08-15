@@ -2,16 +2,13 @@
 
 import {
   getCanvasPoint,
-  drawInteractiveShape,
-  getHandleAtPoint,
   triggerHaptic
 } from './canvas.js';
 import { setupGestures } from './gestures.js';
 import {
   initFaceDetectionModel,
-  updateRealTimeTracks,
-  smoothTracks,
-  getTrackBox
+  scanAndTrackFaces,
+  getInterpolatedFaceBox
 } from './faceTracker.js';
 import {
   upsertKeyframe,
@@ -32,10 +29,11 @@ import { initPWA } from './pwa.js';
     tool: 'rect',          // 'pan' | 'rect' | 'oval'
     mode: 'blur',          // 'redact' | 'blur' | 'pixelate'
     color: '#0a0a0a',
-    blurRadius: 20,
+    blurRadius: 24,
     pixelSize: 16,
     facePadding: 20,
-    faceDetectionEnabled: true, // Enabled by default for effortless UX
+    minConfidence: 0.35,
+    faceDetectionEnabled: true,
     faceModelLoaded: false,
     faceModelLoading: false,
     editMode: 'lecture',   // 'lecture' | 'marker'
@@ -77,12 +75,20 @@ import { initPWA } from './pwa.js';
   const playBtn = document.getElementById('play-btn');
   const playIcon = document.getElementById('play-icon');
   
-  const faceToggleBtn = document.getElementById('face-toggle-btn');
+  // Filmora 14 AI Face Mosaic Refs
+  const scanMosaicBtn = document.getElementById('scan-mosaic-btn');
+  const mosaicProgressBox = document.getElementById('mosaic-progress-box');
+  const mosaicStatusText = document.getElementById('mosaic-status-text');
+  const mosaicPctText = document.getElementById('mosaic-pct-text');
+  const mosaicProgressBar = document.getElementById('mosaic-progress-bar');
+  const filmoraFaceGallery = document.getElementById('filmora-face-gallery');
+  const selectAllFacesBtn = document.getElementById('select-all-faces-btn');
+  const deselectAllFacesBtn = document.getElementById('deselect-all-faces-btn');
+
+  const confRange = document.getElementById('conf-range');
+  const confVal = document.getElementById('conf-val');
   const paddingRange = document.getElementById('padding-range');
   const paddingVal = document.getElementById('padding-val');
-  const detectedPersonsBox = document.getElementById('detected-persons-box');
-  const personCountBadge = document.getElementById('person-count-badge');
-  const personChipList = document.getElementById('person-chip-list');
 
   const markerModeBtn = document.getElementById('marker-mode-btn');
   const newTrackBtn = document.getElementById('new-track-btn');
@@ -136,130 +142,163 @@ import { initPWA } from './pwa.js';
     setZoom(Math.max(0.01, Math.min(3, s)));
   }
 
-  // Stamp and Face Status UI
   function updateStamp() {
-    if (state.faceDetectionEnabled) {
-      stampEl.innerHTML = '<span class="dot"></span>MediaPipe Full-Range IA — Détection active';
+    if (state.faceDetectionEnabled && faceTracks.length > 0) {
+      stampEl.innerHTML = '<span class="dot"></span>Filmora AI Face Mosaic — Actif';
     } else {
       stampEl.innerHTML = '<span class="dot"></span>100% local — aucun réseau';
     }
   }
 
   function updateFaceUI() {
-    if (state.faceModelLoading) {
-      faceToggleBtn.textContent = 'Chargement de l\'IA…';
-      faceToggleBtn.disabled = true;
-    } else if (state.faceModelLoaded) {
-      faceToggleBtn.disabled = false;
-      faceToggleBtn.textContent = state.faceDetectionEnabled ? 'Masquage auto actif — désactiver' : 'Activer le masquage automatique';
-      faceToggleBtn.classList.toggle('on', state.faceDetectionEnabled);
-    } else {
-      faceToggleBtn.disabled = false;
-      faceToggleBtn.textContent = 'Activer le masquage automatique';
-    }
-    const count = faceTracks.filter(t => !t.deleted && t.enabled !== false).length;
-    faceStatusLabel.textContent = state.faceDetectionEnabled
-      ? `${count} visage(s) masqué(s)`
+    const activeCount = faceTracks.filter(t => !t.deleted && t.enabled !== false).length;
+    faceStatusLabel.textContent = faceTracks.length > 0
+      ? `${activeCount} visage(s) masqué(s) sur ${faceTracks.filter(t => !t.deleted).length}`
       : '';
     updateStamp();
-    renderFaceChips();
+    renderFilmoraGallery();
   }
 
-  function renderFaceChips() {
-    const detectedFacesBox = document.getElementById('detected-faces-box');
-    const faceChipList = document.getElementById('face-chip-list');
-    if (!faceChipList || !detectedFacesBox) return;
-
+  /**
+   * 🌟 FILMORA 14 STYLE VISUAL FACE GALLERY
+   */
+  function renderFilmoraGallery() {
+    if (!filmoraFaceGallery) return;
     const activeTracks = faceTracks.filter(t => !t.deleted);
+
     if (activeTracks.length === 0) {
-      detectedFacesBox.style.display = 'none';
+      filmoraFaceGallery.innerHTML = `
+        <div style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 12px; border: 1px dashed var(--border); border-radius: 8px;">
+          Aucun visage scanné pour l'instant.<br>Cliquez sur <strong>⚡ Analyser les visages</strong> ci-dessus.
+        </div>
+      `;
       return;
     }
-    detectedFacesBox.style.display = '';
 
-    faceChipList.innerHTML = '';
-    activeTracks.forEach(track => {
-      const chip = document.createElement('div');
+    filmoraFaceGallery.innerHTML = '';
+    activeTracks.forEach((track) => {
       const isEnabled = track.enabled !== false;
-      chip.style.cssText = `
-        display: inline-flex;
+      const card = document.createElement('div');
+      card.style.cssText = `
+        display: flex;
         align-items: center;
-        gap: 5px;
-        padding: 3px 7px;
-        font-size: 11px;
-        font-weight: 600;
-        border-radius: 6px;
+        gap: 10px;
+        padding: 6px 10px;
+        background: ${isEnabled ? 'rgba(0, 245, 212, 0.08)' : 'var(--surface)'};
         border: 1px solid ${isEnabled ? 'var(--accent)' : 'var(--border)'};
-        background: ${isEnabled ? 'rgba(0, 245, 212, 0.15)' : 'var(--surface)'};
-        color: ${isEnabled ? 'var(--accent)' : 'var(--text-muted)'};
+        border-radius: 8px;
+        transition: all 0.15s ease;
       `;
 
-      const toggleBtn = document.createElement('span');
-      toggleBtn.style.cursor = 'pointer';
-      toggleBtn.textContent = `${isEnabled ? '👁️' : '🚫'} ${track.name}`;
-      toggleBtn.title = isEnabled ? 'Cliquer pour désactiver ce masque' : 'Cliquer pour réactiver ce masque';
-      toggleBtn.addEventListener('click', () => {
+      // Avatar Thumbnail
+      const avatar = document.createElement('img');
+      avatar.src = track.avatarUrl || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="%23666"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg>';
+      avatar.style.cssText = `
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        object-fit: cover;
+        border: 2px solid ${isEnabled ? 'var(--accent)' : '#444'};
+        flex-shrink: 0;
+        background: #000;
+      `;
+
+      // Label & Status
+      const infoBox = document.createElement('div');
+      infoBox.style.cssText = 'flex: 1; min-width: 0;';
+      const name = document.createElement('div');
+      name.style.cssText = 'font-size: 12px; font-weight: 600; color: var(--text);';
+      name.textContent = track.name;
+      const sub = document.createElement('div');
+      sub.style.cssText = `font-size: 10px; color: ${isEnabled ? 'var(--accent)' : 'var(--text-muted)'};`;
+      sub.textContent = isEnabled ? 'Floutage actif' : 'Visage visible (non masqué)';
+      infoBox.appendChild(name);
+      infoBox.appendChild(sub);
+
+      // Checkbox / Toggle
+      const toggle = document.createElement('button');
+      toggle.className = isEnabled ? 'btn primary' : 'btn ghost';
+      toggle.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 6px;';
+      toggle.textContent = isEnabled ? 'Masqué' : 'Visible';
+      toggle.addEventListener('click', () => {
         track.enabled = !isEnabled;
         updateFaceUI();
       });
 
-      const delBtn = document.createElement('span');
-      delBtn.style.cssText = 'cursor: pointer; opacity: 0.6; padding-left: 2px; font-weight: bold; font-size: 13px;';
-      delBtn.textContent = '×';
-      delBtn.title = 'Supprimer définitivement ce masque';
-      delBtn.addEventListener('click', (e) => {
+      // Delete False Positive Button
+      const del = document.createElement('button');
+      del.className = 'btn ghost';
+      del.style.cssText = 'padding: 4px 6px; font-size: 13px; color: #ff5555; opacity: 0.7;';
+      del.innerHTML = '&times;';
+      del.title = 'Supprimer ce visage (faux positif)';
+      del.addEventListener('click', (e) => {
         e.stopPropagation();
         track.deleted = true;
         updateFaceUI();
       });
 
-      chip.appendChild(toggleBtn);
-      chip.appendChild(delBtn);
-      faceChipList.appendChild(chip);
+      card.appendChild(avatar);
+      card.appendChild(infoBox);
+      card.appendChild(toggle);
+      card.appendChild(del);
+      filmoraFaceGallery.appendChild(card);
     });
   }
 
-  async function loadFaceModels() {
-    if (state.faceModelLoaded || state.faceModelLoading) return;
-    state.faceModelLoading = true;
-    updateFaceUI();
-    try {
-      await initFaceDetectionModel(state.minConfidence || 0.35);
-      state.faceModelLoaded = true;
-    } catch (err) {
-      console.warn('[Encre Vidéo] Model load error:', err);
-    } finally {
-      state.faceModelLoading = false;
-      updateFaceUI();
-    }
-  }
+  // Scan Action (Filmora 14 AI Face Mosaic)
+  if (scanMosaicBtn) {
+    scanMosaicBtn.addEventListener('click', async () => {
+      if (!state.hasVideo) {
+        window.alert("Veuillez d'abord ouvrir une vidéo.");
+        return;
+      }
+      scanMosaicBtn.disabled = true;
+      if (mosaicProgressBox) mosaicProgressBox.style.display = '';
 
-  faceToggleBtn.addEventListener('click', async () => {
-    state.faceDetectionEnabled = !state.faceDetectionEnabled;
-    if (state.faceDetectionEnabled && !state.faceModelLoaded) {
-      await loadFaceModels();
-    }
-    updateFaceUI();
-  });
+      try {
+        const validTracks = await scanAndTrackFaces(videoEl, (pct, count) => {
+          if (mosaicProgressBar) mosaicProgressBar.style.width = pct + '%';
+          if (mosaicPctText) mosaicPctText.textContent = pct + '%';
+          if (mosaicStatusText) mosaicStatusText.textContent = `Analyse temporelle : ${count} visage(s) détecté(s)…`;
+        }, state.minConfidence || 0.35);
 
-  const resetDetectionBtn = document.getElementById('reset-detection-btn');
-  if (resetDetectionBtn) {
-    resetDetectionBtn.addEventListener('click', () => {
-      faceTracks = [];
-      updateFaceUI();
-      triggerHaptic();
+        faceTracks = validTracks;
+        state.faceDetectionEnabled = true;
+        state.faceModelLoaded = true;
+        updateFaceUI();
+
+        if (mosaicStatusText) mosaicStatusText.textContent = `✅ Analyse terminée : ${validTracks.length} visage(s) trouvé(s) !`;
+        setTimeout(() => {
+          if (mosaicProgressBox) mosaicProgressBox.style.display = 'none';
+        }, 3000);
+      } catch (err) {
+        console.error(err);
+        window.alert("Erreur lors de l'analyse vidéo : " + (err.message || err));
+        if (mosaicProgressBox) mosaicProgressBox.style.display = 'none';
+      } finally {
+        scanMosaicBtn.disabled = false;
+      }
     });
   }
 
-  const confRange = document.getElementById('conf-range');
-  const confVal = document.getElementById('conf-val');
+  if (selectAllFacesBtn) {
+    selectAllFacesBtn.addEventListener('click', () => {
+      faceTracks.forEach(t => { t.enabled = true; });
+      updateFaceUI();
+    });
+  }
+
+  if (deselectAllFacesBtn) {
+    deselectAllFacesBtn.addEventListener('click', () => {
+      faceTracks.forEach(t => { t.enabled = false; });
+      updateFaceUI();
+    });
+  }
+
   if (confRange) {
-    confRange.addEventListener('input', async (e) => {
+    confRange.addEventListener('input', (e) => {
       state.minConfidence = parseInt(e.target.value, 10) / 100;
       if (confVal) confVal.textContent = e.target.value + '%';
-      if (state.faceModelLoaded) {
-        await initFaceDetectionModel(state.minConfidence);
-      }
     });
   }
 
@@ -532,23 +571,9 @@ import { initPWA } from './pwa.js';
     clearOverlay();
   });
 
-  // Video Render Loop
+  // Video Render Loop (Silky 60 FPS playback with zero inference lag)
   function loop() {
     if (state.hasVideo && videoEl.readyState >= 2) {
-      // Real-time Detection Pass
-      if (state.faceDetectionEnabled && state.faceModelLoaded) {
-        updateRealTimeTracks(videoEl, videoEl.currentTime, faceTracks, uuid, state.minConfidence || 0.35)
-          .then((newTracks) => {
-            faceTracks = newTracks;
-            smoothTracks(faceTracks);
-            updateFaceUI();
-          })
-          .catch(() => {});
-      } else if (state.faceDetectionEnabled && faceTracks.length > 0) {
-        smoothTracks(faceTracks);
-      }
-
-      // Draw blur/redact on Canvas
       renderVideoFrame(
         videoEl,
         workCanvas,
@@ -556,7 +581,7 @@ import { initPWA } from './pwa.js';
         state,
         faceTracks,
         manualTracks,
-        getTrackBox,
+        getInterpolatedFaceBox,
         interpolateTrack
       );
 
@@ -605,12 +630,11 @@ import { initPWA } from './pwa.js';
       manualTracks = [];
       selectedManualTrackId = null;
       renderManualTrackList();
-      renderFaceChips();
+      renderFilmoraGallery();
       videoEl.src = url;
       videoEl.load();
       state.hasVideo = true;
       updateChromeVisibility();
-      await loadFaceModels();
     } catch (err) {
       console.error('[Encre Vidéo] Error loading video file:', err);
     }
@@ -629,6 +653,11 @@ import { initPWA } from './pwa.js';
     updateTimeLabel();
     fitToScreen();
     startLoop();
+
+    // Auto-trigger Filmora AI Face Mosaic scan
+    setTimeout(() => {
+      if (scanMosaicBtn) scanMosaicBtn.click();
+    }, 300);
   });
 
   videoEl.addEventListener('timeupdate', () => {
@@ -710,7 +739,7 @@ import { initPWA } from './pwa.js';
     playBtn.disabled = on;
     seekRange.disabled = on;
     markerModeBtn.disabled = on;
-    faceToggleBtn.disabled = on || state.faceModelLoading;
+    if (scanMosaicBtn) scanMosaicBtn.disabled = on;
     beforeAfterBtn.disabled = on;
   }
 
@@ -761,6 +790,5 @@ import { initPWA } from './pwa.js';
   renderManualTrackList();
   updateChromeVisibility();
   updateFaceUI();
-  loadFaceModels();
 
 })();

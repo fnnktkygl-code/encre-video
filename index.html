@@ -69,15 +69,33 @@
 
     <aside id="side-panel" class="hidden">
       <div class="panel-section">
-        <h2>Détection IA des Visages</h2>
-        <p class="hint">Google MediaPipe Full-Range (Haute précision faciale). Détection continue 100% locale.</p>
+        <h2>⚡ AI Face Mosaic (Filmora 14)</h2>
+        <p class="hint">Analyse complète et continue de la vidéo. Extrait les visages, lisse leurs trajectoires et applique un flou doux sans artefacts.</p>
         
-        <button class="panel-btn on" id="face-toggle-btn">Masquage IA actif — désactiver</button>
-        <button class="btn secondary" id="reset-detection-btn" style="width: 100%; margin-top: 6px; font-size: 12px; padding: 6px 10px; display: flex; align-items: center; justify-content: center; gap: 6px;">
-          🔄 Relancer / Réinitialiser l'IA
+        <button class="panel-btn primary" id="scan-mosaic-btn" style="padding: 10px; font-size: 13px; font-weight: bold; margin-bottom: 8px;">
+          ⚡ Analyser les visages (AI Scan)
         </button>
 
-        <div id="ai-controls" style="margin-top: 12px;">
+        <!-- Scan Progress Box -->
+        <div id="mosaic-progress-box" style="display:none; margin-bottom: 10px; padding: 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: 8px;">
+          <div style="display:flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px;">
+            <span id="mosaic-status-text" style="color: var(--accent); font-weight: bold;">Analyse temporelle en cours…</span>
+            <span id="mosaic-pct-text">0%</span>
+          </div>
+          <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+            <div id="mosaic-progress-bar" style="width: 0%; height: 100%; background: var(--accent); transition: width 0.1s;"></div>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+          <button class="btn secondary" id="select-all-faces-btn" style="flex: 1; font-size: 11px; padding: 5px;">✓ Tout masquer</button>
+          <button class="btn ghost" id="deselect-all-faces-btn" style="flex: 1; font-size: 11px; padding: 5px;">🚫 Tout démasquer</button>
+        </div>
+
+        <!-- Filmora 14 Visual Face Gallery -->
+        <div id="filmora-face-gallery" style="display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; margin-bottom: 12px;"></div>
+
+        <div id="ai-controls">
           <div class="field">
             <label for="conf-range">Seuil de Détection</label>
             <input type="range" id="conf-range" min="20" max="65" value="35">
@@ -90,16 +108,11 @@
             <span class="val" id="padding-val">20%</span>
           </div>
         </div>
-
-        <div id="detected-faces-box" style="margin-top: 10px; display: none;">
-          <div style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--text-muted);">Visages actifs (cliquez pour exclure ou supprimer) :</div>
-          <div id="face-chip-list" style="display: flex; flex-wrap: wrap; gap: 4px; max-height: 100px; overflow-y: auto;"></div>
-        </div>
       </div>
 
       <div class="panel-section">
         <h2>Repères Manuels &amp; Suivi</h2>
-        <p class="hint">Floutez manuellement n'importe quel visage, corps ou objet avec suivi optique de mouvement.</p>
+        <p class="hint">Pour flouter une personne ou un objet spécifique manuellement.</p>
         <div style="display: flex; gap: 8px; margin-bottom: 10px;">
           <button class="panel-btn" id="marker-mode-btn" style="flex: 1;">Mode « Repère »</button>
           <button class="btn secondary" id="new-track-btn" title="Ajouter un nouveau repère distinct" style="padding: 0 12px; font-size: 12px;">+ Nouveau</button>
