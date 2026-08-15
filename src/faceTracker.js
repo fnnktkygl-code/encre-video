@@ -85,9 +85,188 @@ export function detectFrameBboxes(videoEl, minConfidence = 0.35) {
   return detections;
 }
 
+export function seekVideoFrame(videoEl, time) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    const cleanup = () => {
+      if (!resolved) {
+        resolved = true;
+        videoEl.removeEventListener('seeked', onSeeked);
+        resolve();
+      }
+    };
+    const onSeeked = () => setTimeout(cleanup, 25);
+    videoEl.addEventListener('seeked', onSeeked, { once: true });
+    videoEl.currentTime = time;
+    setTimeout(cleanup, 250);
+  });
+}
+
+function createAvatarCrop(ctx, box) {
+  try {
+    const pad = Math.round(box.w * 0.15);
+    const sx = Math.max(0, Math.round(box.x - pad));
+    const sy = Math.max(0, Math.round(box.y - pad));
+    const sw = Math.min(ctx.canvas.width - sx, Math.round(box.w + pad * 2));
+    const sh = Math.min(ctx.canvas.height - sy, Math.round(box.h + pad * 2));
+
+    if (sw <= 0 || sh <= 0) return null;
+
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = 64;
+    cropCanvas.height = 64;
+    const cctx = cropCanvas.getContext('2d');
+
+    cctx.beginPath();
+    cctx.arc(32, 32, 32, 0, Math.PI * 2);
+    cctx.clip();
+    cctx.drawImage(ctx.canvas, sx, sy, sw, sh, 0, 0, 64, 64);
+
+    return cropCanvas.toDataURL('image/jpeg', 0.85);
+  } catch (e) {
+    return null;
+  }
+}
+
+function captureTemplate(ctx, box) {
+  const bw = Math.max(8, Math.round(box.w));
+  const bh = Math.max(8, Math.round(box.h));
+  const bx = Math.max(0, Math.round(box.x));
+  const by = Math.max(0, Math.round(box.y));
+
+  try {
+    const rawData = ctx.getImageData(bx, by, bw, bh);
+    const tw = 24;
+    const th = 24;
+    const grid = new Float32Array(tw * th);
+
+    const stepX = bw / tw;
+    const stepY = bh / th;
+
+    for (let gy = 0; gy < th; gy++) {
+      for (let gx = 0; gx < tw; gx++) {
+        const px = Math.min(bw - 1, Math.floor(gx * stepX));
+        const py = Math.min(bh - 1, Math.floor(gy * stepY));
+        const idx = (py * bw + px) * 4;
+        const lum = rawData.data[idx] * 0.299 + rawData.data[idx + 1] * 0.587 + rawData.data[idx + 2] * 0.114;
+        grid[gy * tw + gx] = lum;
+      }
+    }
+
+    return { grid, tw, th, origW: bw, origH: bh };
+  } catch (e) {
+    return null;
+  }
+}
+
+function matchTemplateSSD(ctx, template, currentBox, margin, maxW, maxH) {
+  const sx = Math.max(0, Math.round(currentBox.x - margin));
+  const sy = Math.max(0, Math.round(currentBox.y - margin));
+  const ex = Math.min(maxW, Math.round(currentBox.x + currentBox.w + margin));
+  const ey = Math.min(maxH, Math.round(currentBox.y + currentBox.h + margin));
+  const sw = ex - sx;
+  const sh = ey - sy;
+
+  if (sw <= currentBox.w || sh <= currentBox.h) return currentBox;
+
+  try {
+    const searchData = ctx.getImageData(sx, sy, sw, sh);
+    const sd = searchData.data;
+
+    let bestScore = Infinity;
+    let bestDx = 0;
+    let bestDy = 0;
+
+    const tw = template.tw;
+    const th = template.th;
+    const tgrid = template.grid;
+    const bw = currentBox.w;
+    const bh = currentBox.h;
+
+    const step = 3;
+    const maxCandidateX = sw - bw;
+    const maxCandidateY = sh - bh;
+
+    for (let cy = 0; cy <= maxCandidateY; cy += step) {
+      for (let cx = 0; cx <= maxCandidateX; cx += step) {
+        let ssd = 0;
+        const stepX = bw / tw;
+        const stepY = bh / th;
+
+        for (let gy = 0; gy < th; gy += 2) {
+          for (let gx = 0; gx < tw; gx += 2) {
+            const px = Math.min(sw - 1, Math.floor(cx + gx * stepX));
+            const py = Math.min(sh - 1, Math.floor(cy + gy * stepY));
+            const sidx = (py * sw + px) * 4;
+            const slum = sd[sidx] * 0.299 + sd[sidx + 1] * 0.587 + sd[sidx + 2] * 0.114;
+            const diff = slum - tgrid[gy * tw + gx];
+            ssd += diff * diff;
+          }
+        }
+
+        if (ssd < bestScore) {
+          bestScore = ssd;
+          bestDx = cx;
+          bestDy = cy;
+        }
+      }
+    }
+
+    const matchedX = sx + bestDx;
+    const matchedY = sy + bestDy;
+
+    const smoothX = currentBox.x * 0.25 + matchedX * 0.75;
+    const smoothY = currentBox.y * 0.25 + matchedY * 0.75;
+
+    return {
+      x: Math.max(0, Math.min(maxW - currentBox.w, smoothX)),
+      y: Math.max(0, Math.min(maxH - currentBox.h, smoothY)),
+      w: currentBox.w,
+      h: currentBox.h
+    };
+  } catch (e) {
+    return currentBox;
+  }
+}
+
+function findLocalFaceMatch(videoEl, currentBox) {
+  try {
+    const detections = detectFrameBboxes(videoEl, 0.25);
+    if (!detections || detections.length === 0) return null;
+
+    const curCx = currentBox.x + currentBox.w / 2;
+    const curCy = currentBox.y + currentBox.h / 2;
+
+    let bestFace = null;
+    let bestDist = Infinity;
+
+    detections.forEach(d => {
+      const dcx = d.x + d.w / 2;
+      const dcy = d.y + d.h / 2;
+      const dist = Math.hypot(dcx - curCx, dcy - curCy);
+      const maxAllowedDist = Math.max(currentBox.w, currentBox.h, 50) * 1.5;
+
+      if (dist < maxAllowedDist && dist < bestDist) {
+        bestDist = dist;
+        bestFace = d;
+      }
+    });
+
+    if (bestFace) {
+      return {
+        x: bestFace.x,
+        y: bestFace.y,
+        w: bestFace.w,
+        h: bestFace.h
+      };
+    }
+  } catch (e) {}
+
+  return null;
+}
+
 /**
- * 🌟 FILMORA 14 STYLE: FULL VIDEO PRE-ANALYSIS SCANNER
- * Scans video, tracks each face trajectory, and extracts visual thumbnail avatar crops!
+ * 🌟 SCAN ENTIRE VIDEO FOR ALL FACES (Filmora 14 Style)
  */
 export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfidence = 0.35) {
   if (isScanning) return [];
@@ -115,33 +294,16 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
 
     while (currentTime <= duration) {
       step++;
+      await seekVideoFrame(videoEl, currentTime);
 
-      // Seek video to frame
-      await new Promise(resolve => {
-        let done = false;
-        const cleanup = () => {
-          if (!done) {
-            done = true;
-            videoEl.removeEventListener('seeked', onSeeked);
-            resolve();
-          }
-        };
-        const onSeeked = () => setTimeout(cleanup, 25);
-        videoEl.addEventListener('seeked', onSeeked, { once: true });
-        videoEl.currentTime = currentTime;
-        setTimeout(cleanup, 200);
-      });
-
-      // Capture frame & run detection
       offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
       const frameDets = detectFrameBboxes(videoEl, minConfidence);
 
-      // Match detections to existing tracks
       const usedDets = new Set();
       tracks.forEach(track => {
         if (track.keyframes.length === 0) return;
         const lastKf = track.keyframes[track.keyframes.length - 1];
-        if (Math.abs(currentTime - lastKf.t) > 1.4) return; // lost too long
+        if (Math.abs(currentTime - lastKf.t) > 1.4) return;
 
         const lcx = lastKf.x + lastKf.w / 2;
         const lcy = lastKf.y + lastKf.h / 2;
@@ -174,7 +336,6 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
             score: matched.score
           });
 
-          // If this detection is clearer, update avatar crop
           if (matched.score > track.bestScore) {
             track.bestScore = matched.score;
             track.bestTimestamp = currentTime;
@@ -183,7 +344,6 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
         }
       });
 
-      // Unmatched detections become new tracks
       frameDets.forEach((d, i) => {
         if (usedDets.has(i)) return;
         const newTrack = {
@@ -211,14 +371,12 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
       currentTime += stepSec;
     }
 
-    // Filter out spurious 1-frame glitches (only keep confirmed tracks with >= 2 keyframes)
     const validTracks = tracks.filter(t => t.keyframes.length >= 2);
     validTracks.forEach((t, idx) => {
       t.id = idx + 1;
       t.name = `Visage ${idx + 1}`;
     });
 
-    // Restore video state
     videoEl.currentTime = originalTime;
     if (!originalPaused) videoEl.play();
     onProgress(100, validTracks.length);
@@ -232,31 +390,93 @@ export async function scanAndTrackFaces(videoEl, onProgress = () => {}, minConfi
   }
 }
 
-function createAvatarCrop(ctx, box) {
-  try {
-    const pad = Math.round(box.w * 0.15);
-    const sx = Math.max(0, Math.round(box.x - pad));
-    const sy = Math.max(0, Math.round(box.y - pad));
-    const sw = Math.min(ctx.canvas.width - sx, Math.round(box.w + pad * 2));
-    const sh = Math.min(ctx.canvas.height - sy, Math.round(box.h + pad * 2));
+/**
+ * 🌟 TRACK A MANUALLY ADDED MISSED FACE (BIDIRECTIONAL TRACKING)
+ * Follows the user-selected face forward and backward across the entire clip!
+ */
+export async function trackFaceBidirectional(videoEl, initialBox, startT, onProgress = () => {}) {
+  const originalTime = videoEl.currentTime;
+  const originalPaused = videoEl.paused;
+  videoEl.pause();
 
-    if (sw <= 0 || sh <= 0) return null;
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = videoEl.videoWidth;
+  offCanvas.height = videoEl.videoHeight;
+  const offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
 
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = 64;
-    cropCanvas.height = 64;
-    const cctx = cropCanvas.getContext('2d');
+  await seekVideoFrame(videoEl, startT);
+  offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
+  const avatarUrl = createAvatarCrop(offCtx, initialBox);
+  let template = captureTemplate(offCtx, initialBox);
 
-    // Circular crop for beautiful Filmora-style avatar
-    cctx.beginPath();
-    cctx.arc(32, 32, 32, 0, Math.PI * 2);
-    cctx.clip();
-    cctx.drawImage(ctx.canvas, sx, sy, sw, sh, 0, 0, 64, 64);
+  const duration = videoEl.duration || 10;
+  const stepSec = 0.12;
+  const keyframes = [{ t: startT, x: initialBox.x, y: initialBox.y, w: initialBox.w, h: initialBox.h }];
 
-    return cropCanvas.toDataURL('image/jpeg', 0.85);
-  } catch (e) {
-    return null;
+  const totalSteps = Math.max(1, Math.ceil(duration / stepSec));
+  let stepCount = 0;
+
+  // Track Forward
+  let currentBox = { ...initialBox };
+  let currentT = startT;
+
+  while (currentT < duration) {
+    currentT = Math.min(duration, currentT + stepSec);
+    stepCount++;
+    await seekVideoFrame(videoEl, currentT);
+    offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
+
+    const aiMatched = findLocalFaceMatch(videoEl, currentBox);
+    if (aiMatched) {
+      currentBox = aiMatched;
+      if (stepCount % 3 === 0) template = captureTemplate(offCtx, currentBox);
+    } else if (template) {
+      const margin = Math.max(40, currentBox.w * 0.7);
+      const nccMatched = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
+      if (nccMatched) {
+        currentBox = nccMatched;
+        if (stepCount % 4 === 0) template = captureTemplate(offCtx, currentBox);
+      }
+    }
+    keyframes.push({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
+    onProgress(Math.min(99, Math.round((stepCount / totalSteps) * 100)));
   }
+
+  // Track Backward
+  currentBox = { ...initialBox };
+  currentT = startT;
+  template = captureTemplate(offCtx, initialBox);
+
+  while (currentT > 0) {
+    currentT = Math.max(0, currentT - stepSec);
+    stepCount++;
+    await seekVideoFrame(videoEl, currentT);
+    offCtx.drawImage(videoEl, 0, 0, offCanvas.width, offCanvas.height);
+
+    const aiMatched = findLocalFaceMatch(videoEl, currentBox);
+    if (aiMatched) {
+      currentBox = aiMatched;
+      if (stepCount % 3 === 0) template = captureTemplate(offCtx, currentBox);
+    } else if (template) {
+      const margin = Math.max(40, currentBox.w * 0.7);
+      const nccMatched = matchTemplateSSD(offCtx, template, currentBox, margin, offCanvas.width, offCanvas.height);
+      if (nccMatched) {
+        currentBox = nccMatched;
+        if (stepCount % 4 === 0) template = captureTemplate(offCtx, currentBox);
+      }
+    }
+    keyframes.unshift({ t: currentT, x: currentBox.x, y: currentBox.y, w: currentBox.w, h: currentBox.h });
+    onProgress(Math.min(99, Math.round((stepCount / totalSteps) * 100)));
+  }
+
+  videoEl.currentTime = originalTime;
+  if (!originalPaused) videoEl.play();
+  onProgress(100);
+
+  return {
+    avatarUrl,
+    keyframes
+  };
 }
 
 export function getInterpolatedFaceBox(track, time, paddingPercent = 20) {
@@ -275,7 +495,6 @@ export function getInterpolatedFaceBox(track, time, paddingPercent = 20) {
   } else if (time >= kfs[kfs.length - 1].t) {
     box = kfs[kfs.length - 1];
   } else {
-    // Binary search
     let low = 0;
     let high = kfs.length - 1;
     while (low <= high) {

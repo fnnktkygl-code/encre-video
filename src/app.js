@@ -8,6 +8,7 @@ import { setupGestures } from './gestures.js';
 import {
   initFaceDetectionModel,
   scanAndTrackFaces,
+  trackFaceBidirectional,
   getInterpolatedFaceBox
 } from './faceTracker.js';
 import {
@@ -36,7 +37,7 @@ import { initPWA } from './pwa.js';
     faceDetectionEnabled: true,
     faceModelLoaded: false,
     faceModelLoading: false,
-    editMode: 'lecture',   // 'lecture' | 'marker'
+    editMode: 'lecture',   // 'lecture' | 'marker' | 'add-face'
     showRawPreview: false,
     scrubbing: false,
     exporting: false,
@@ -84,6 +85,7 @@ import { initPWA } from './pwa.js';
   const filmoraFaceGallery = document.getElementById('filmora-face-gallery');
   const selectAllFacesBtn = document.getElementById('select-all-faces-btn');
   const deselectAllFacesBtn = document.getElementById('deselect-all-faces-btn');
+  const addMissedFaceBtn = document.getElementById('add-missed-face-btn');
 
   const confRange = document.getElementById('conf-range');
   const confVal = document.getElementById('conf-val');
@@ -277,6 +279,27 @@ import { initPWA } from './pwa.js';
         if (mosaicProgressBox) mosaicProgressBox.style.display = 'none';
       } finally {
         scanMosaicBtn.disabled = false;
+      }
+    });
+  }
+
+  // Add Missed Face Mode
+  if (addMissedFaceBtn) {
+    addMissedFaceBtn.addEventListener('click', () => {
+      if (!state.hasVideo) {
+        window.alert("Veuillez d'abord ouvrir une vidéo.");
+        return;
+      }
+      state.editMode = (state.editMode === 'add-face') ? 'lecture' : 'add-face';
+      if (state.editMode === 'add-face') {
+        if (!videoEl.paused) videoEl.pause();
+        addMissedFaceBtn.textContent = '✏️ Tracez le rectangle sur le visage…';
+        addMissedFaceBtn.style.background = 'rgba(0, 245, 212, 0.2)';
+        overlay.style.cursor = 'crosshair';
+      } else {
+        addMissedFaceBtn.textContent = '➕ Ajouter un visage manqué (Tracer & Suivre)';
+        addMissedFaceBtn.style.background = '';
+        overlay.style.cursor = '';
       }
     });
   }
@@ -488,7 +511,7 @@ import { initPWA } from './pwa.js';
     statusbar.classList.toggle('hidden', !state.hasVideo);
   }
 
-  // Pointer interactions on Overlay (Drawing manual markers / Panning)
+  // Pointer interactions on Overlay (Drawing manual markers / Adding missed faces / Panning)
   overlay.addEventListener('pointerdown', (e) => {
     if (!state.hasVideo) return;
     if (gestureHandler && gestureHandler.isMultiTouch()) return;
@@ -501,7 +524,7 @@ import { initPWA } from './pwa.js';
       return;
     }
 
-    if (state.editMode === 'marker') {
+    if (state.editMode === 'marker' || state.editMode === 'add-face') {
       overlay.setPointerCapture(e.pointerId);
       markerStart = getCanvasPoint(e, overlay);
     }
@@ -518,16 +541,22 @@ import { initPWA } from './pwa.js';
       return;
     }
 
-    if (state.editMode === 'marker' && markerStart) {
+    if ((state.editMode === 'marker' || state.editMode === 'add-face') && markerStart) {
       clearOverlay();
       const p = getCanvasPoint(e, overlay);
       const x = Math.min(markerStart.x, p.x), y = Math.min(markerStart.y, p.y);
       const w = Math.abs(p.x - markerStart.x), h = Math.abs(p.y - markerStart.y);
       overlayCtx.save();
-      overlayCtx.strokeStyle = 'rgba(255,255,255,0.95)';
+      overlayCtx.strokeStyle = state.editMode === 'add-face' ? 'rgba(0, 245, 212, 0.95)' : 'rgba(255,255,255,0.95)';
       overlayCtx.lineWidth = 2;
       overlayCtx.setLineDash([6, 4]);
-      overlayCtx.strokeRect(x, y, w, h);
+      if (state.editMode === 'add-face') {
+        overlayCtx.beginPath();
+        overlayCtx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+        overlayCtx.stroke();
+      } else {
+        overlayCtx.strokeRect(x, y, w, h);
+      }
       overlayCtx.restore();
     }
   });
@@ -539,6 +568,54 @@ import { initPWA } from './pwa.js';
       overlay.style.cursor = 'grab';
     }
 
+    // 🌟 Adding a missed face directly into AI Face Gallery with Bidirectional Tracking
+    if (state.editMode === 'add-face' && markerStart) {
+      const p = getCanvasPoint(e, overlay);
+      const x = Math.min(markerStart.x, p.x), y = Math.min(markerStart.y, p.y);
+      const w = Math.abs(p.x - markerStart.x), h = Math.abs(p.y - markerStart.y);
+      clearOverlay();
+      markerStart = null;
+      state.editMode = 'lecture';
+      if (addMissedFaceBtn) {
+        addMissedFaceBtn.textContent = '➕ Ajouter un visage manqué (Tracer & Suivre)';
+        addMissedFaceBtn.style.background = '';
+      }
+      overlay.style.cursor = '';
+
+      if (w < 8 || h < 8) return;
+
+      if (mosaicProgressBox) mosaicProgressBox.style.display = '';
+      if (mosaicStatusText) mosaicStatusText.textContent = '⚡ Traçage et suivi du visage sur la vidéo…';
+
+      trackFaceBidirectional(videoEl, { x, y, w, h }, videoEl.currentTime, (pct) => {
+        if (mosaicProgressBar) mosaicProgressBar.style.width = pct + '%';
+        if (mosaicPctText) mosaicPctText.textContent = pct + '%';
+      }).then(result => {
+        const id = faceTracks.length + 1;
+        const newTrack = {
+          id: id,
+          name: `Visage ${id} (Ajouté)`,
+          enabled: true,
+          deleted: false,
+          avatarUrl: result.avatarUrl,
+          keyframes: result.keyframes
+        };
+        faceTracks.push(newTrack);
+        state.faceDetectionEnabled = true;
+        updateFaceUI();
+        triggerHaptic();
+        if (mosaicStatusText) mosaicStatusText.textContent = `✅ Visage ajouté et suivi avec succès !`;
+        setTimeout(() => {
+          if (mosaicProgressBox) mosaicProgressBox.style.display = 'none';
+        }, 2500);
+      }).catch(err => {
+        console.error(err);
+        if (mosaicProgressBox) mosaicProgressBox.style.display = 'none';
+      });
+      return;
+    }
+
+    // Adding keyframe on manual track
     if (state.editMode === 'marker' && markerStart) {
       const p = getCanvasPoint(e, overlay);
       const x = Math.min(markerStart.x, p.x), y = Math.min(markerStart.y, p.y);
@@ -740,6 +817,7 @@ import { initPWA } from './pwa.js';
     seekRange.disabled = on;
     markerModeBtn.disabled = on;
     if (scanMosaicBtn) scanMosaicBtn.disabled = on;
+    if (addMissedFaceBtn) addMissedFaceBtn.disabled = on;
     beforeAfterBtn.disabled = on;
   }
 
